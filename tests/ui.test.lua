@@ -2134,6 +2134,37 @@ do
         and src:find("elseif ghost[it.key] or retired[it.key] then", 1, true) ~= nil)
 end
 
+-- ---- Lockscreen overlay (2026-09-04 visual pass) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("lock: the overlay asks core what to draw",
+        src:find("core.lockBoard(lastRenderList, MAX_RINGS)", 1, true) ~= nil
+        and src:find("core.lockSummary(board.counts, n)", 1, true) ~= nil)
+  check("lock: ring slots are built once and mutated, never rebuilt per frame",
+        src:find("local function lockBuild(f)", 1, true) ~= nil
+        and src:find("local function lockPaint(canvases, board, spin)", 1, true) ~= nil)
+  check("lock: an unused ring slot is skipped, not drawn empty",
+        src:find('track.action, ring.action, lbl.text = "skip", "skip", ""', 1, true) ~= nil)
+  check("lock: only a WORKING project spins; a blocked one holds a full ring",
+        src:find("if e.state == \"working\" then", 1, true) ~= nil
+        and src:find("ring.startAngle, ring.endAngle = 0, 359.9", 1, true) ~= nil)
+  -- the animation clock is the one thing that can outlive the lock: it must be
+  -- retained (a bare timer is GC bait) and stopped on release
+  check("lock: the animation timer is retained on lockState",
+        src:find("lockState = { canvases = canvases, tap = tap, rearm = rearm, anim = anim }", 1, true) ~= nil)
+  check("lock: unlocking stops the animation timer",
+        src:find("pcall(function() if lockState.anim then lockState.anim:stop() end end)", 1, true) ~= nil)
+  check("lock: the face can be previewed WITHOUT engaging the input block",
+        src:find("function FX.lockPreview(seconds)", 1, true) ~= nil
+        and src:find("_G.__ccLockPreview = FX.lockPreview", 1, true) ~= nil)
+  -- the preview must never install the swallow-everything eventtap
+  check("lock: the preview installs no input tap",
+        src:find("function FX.lockPreview(seconds)", 1, true) ~= nil
+        and not src:sub(src:find("function FX.lockPreview(seconds)", 1, true)):find("hs.eventtap.new", 1, true))
+end
+
 -- ---- User Stories tab (spec/product/user-stories.md viewer/editor) ----
 do
   local f = io.open(ROOT .. "claude-dashboard.lua", "r")

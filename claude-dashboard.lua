@@ -3770,35 +3770,131 @@ local function lockRelease()
   if not lockState then return end
   pcall(function() if lockState.tap then lockState.tap:stop() end end)
   pcall(function() if lockState.rearm then lockState.rearm:stop() end end)
+  pcall(function() if lockState.anim then lockState.anim:stop() end end)
   for _, c in ipairs(lockState.canvases or {}) do pcall(function() c:delete() end) end
   lockState = nil
   print("[cc-lock] 🔓 unlocked")
 end
 _G.__ccLockRelease = lockRelease  -- SSH/console bail-out: hs -c "_G.__ccLockRelease()"
 
+-- The overlay's face. Built once per screen, then MUTATED in place by lockPaint --
+-- rebuilding elements every frame would flicker and churn. MAX_RINGS slots are laid
+-- out up front and hidden (action = "skip") until a project needs one, so a project
+-- appearing or finishing while you are away costs an attribute write, not a rebuild.
+local MAX_RINGS = 6
+local function lockBuild(f)
+  local c = hs.canvas.new({ x = f.x, y = f.y, w = f.w, h = f.h })
+  c:level(hs.canvas.windowLevels.screenSaver)
+  local cx, mid = f.w / 2, f.h / 2
+  -- A vertical wash rather than a flat fill: the old overlay read as a dead
+  -- rectangle, and on an OLED panel the gradient hides banding.
+  c:appendElements({ type = "rectangle", action = "fill",
+    fillGradient = "linear", fillGradientAngle = 90,
+    fillGradientColors = { { red = 0.055, green = 0.055, blue = 0.085, alpha = 1.0 },
+                           { red = 0.015, green = 0.015, blue = 0.025, alpha = 1.0 } },
+    frame = { x = 0, y = 0, w = f.w, h = f.h } })
+  c:appendElements(
+    { id = "clock", type = "text", text = "", textSize = 96, textAlignment = "center",
+      textColor = { white = 0.96 }, textFont = "Helvetica Neue Thin",
+      frame = { x = 0, y = mid - 250, w = f.w, h = 116 } },
+    { id = "date", type = "text", text = "", textSize = 17, textAlignment = "center",
+      textColor = { white = 0.46 }, frame = { x = 0, y = mid - 136, w = f.w, h = 26 } },
+    { id = "summary", type = "text", text = "", textSize = 13.5, textAlignment = "center",
+      textColor = { white = 0.42 }, frame = { x = 0, y = mid + 22, w = f.w, h = 22 } })
+  -- The ring row. Each slot is a dim track, a bright rotating arc, and a label.
+  local gap, r = 138, 30
+  for i = 1, MAX_RINGS do
+    c:appendElements(
+      { id = "track" .. i, type = "circle", action = "stroke", strokeWidth = 3,
+        strokeColor = { white = 0.14 }, center = { x = cx, y = mid - 52 }, radius = r },
+      { id = "ring" .. i, type = "arc", action = "stroke", strokeWidth = 4, arcRadii = false,
+        strokeCapStyle = "round",
+        strokeColor = { white = 0.8 }, center = { x = cx, y = mid - 52 }, radius = r,
+        startAngle = 0, endAngle = 90 },
+      { id = "lbl" .. i, type = "text", text = "", textSize = 11.5, textAlignment = "center",
+        textColor = { white = 0.62 }, frame = { x = cx - gap / 2, y = mid - 8, w = gap, h = 30 } })
+  end
+  c:appendElements(
+    { type = "text", text = "🔒", textSize = 22, textAlignment = "center",
+      textColor = { white = 0.30 }, frame = { x = 0, y = mid + 92, w = f.w, h = 32 } },
+    { id = "msg", type = "text", text = "", textSize = 16, textAlignment = "center",
+      textColor = { white = 0.72 }, frame = { x = 0, y = mid + 132, w = f.w, h = 32 } },
+    { type = "text", text = "force unlock: ⌘⌥⌃⇧U", textSize = 11, textAlignment = "center",
+      textColor = { white = 0.24 }, frame = { x = 0, y = f.h - 54, w = f.w, h = 22 } })
+  return c
+end
+
+-- One frame. `spin` advances every tick; the board only changes when the fleet does.
+local function lockPaint(canvases, board, spin)
+  local now = os.time()
+  -- Lua's os.date VALIDATES specifiers and rejects the %- no-pad modifier that
+  -- strftime(3) accepts, so the zero is stripped by hand instead.
+  local clock = (os.date("%I:%M", now):gsub("^0", ""))
+  local date = (os.date("%A, %B %d", now):gsub(" 0", " "))
+  local n = #board.entries
+  local summary = core.lockSummary(board.counts, n)
+  for _, c in ipairs(canvases) do
+    pcall(function()
+      local w = c:frame().w
+      c["clock"].text = clock
+      c["date"].text = date
+      c["summary"].text = summary
+      -- Centre the row on the screen it is drawn on: lay the used slots out around
+      -- the middle, then skip the rest.
+      local gap = 132
+      local x0 = w / 2 - ((n - 1) * gap) / 2
+      for i = 1, MAX_RINGS do
+        local e = board.entries[i]
+        local track, ring, lbl = c["track" .. i], c["ring" .. i], c["lbl" .. i]
+        if not e then
+          track.action, ring.action, lbl.text = "skip", "skip", ""
+        else
+          local x = x0 + (i - 1) * gap
+          local col = { hue = e.color.hue / 360, saturation = e.color.saturation,
+                        brightness = e.color.brightness, alpha = 1.0 }
+          -- A blocked project pulses amber and an errored one red: colour carries
+          -- the identity, brightness carries the urgency.
+          if e.state == "approval" then col = { hue = 0.11, saturation = 0.85, brightness = 1.0 }
+          elseif e.state == "error" then col = { hue = 0.0, saturation = 0.75, brightness = 1.0 } end
+          track.action, ring.action = "stroke", "stroke"
+          track.center = { x = x, y = track.center.y }
+          ring.center = { x = x, y = ring.center.y }
+          ring.strokeColor = col
+          lbl.frame = { x = x - gap / 2, y = lbl.frame.y, w = gap, h = lbl.frame.h }
+          lbl.text = e.label
+          lbl.textColor = { hue = col.hue, saturation = (col.saturation or 0) * 0.5,
+                            brightness = 0.82, alpha = 1.0 }
+          if e.state == "working" then
+            -- Only a working project SPINS. A blocked one holds a full ring: it is
+            -- not making progress, and a spinner would say that it is.
+            local a = (spin * 4 + (i - 1) * 40) % 360
+            ring.startAngle, ring.endAngle = a, a + 105
+          else
+            ring.startAngle, ring.endAngle = 0, 359.9
+          end
+        end
+      end
+    end)
+  end
+end
+
+-- Everything the overlay needs from the fleet, without reaching into the tick.
+local function lockBoardNow() return core.lockBoard(lastRenderList, MAX_RINGS) end
+
 function FX.lockEngage()
   if lockState or not FX.lockHas() then return end
-  local IDLE = "Locked — type your password, then press ⏎"
+  local IDLE = "Type your password, then press ⏎"
   local canvases = {}
   for _, scr in ipairs(hs.screen.allScreens()) do
-    local f = scr:fullFrame()
-    local c = hs.canvas.new({ x = f.x, y = f.y, w = f.w, h = f.h })
-    c:level(hs.canvas.windowLevels.screenSaver)
-    c:appendElements(
-      { type = "rectangle", action = "fill", fillColor = { red = 0.04, green = 0.04, blue = 0.06, alpha = 0.985 },
-        frame = { x = 0, y = 0, w = f.w, h = f.h } },
-      { type = "text", text = "🔒", textSize = 70, textAlignment = "center", textColor = { white = 0.92 },
-        frame = { x = 0, y = f.h / 2 - 110, w = f.w, h = 100 } },
-      { id = "msg", type = "text", text = IDLE, textSize = 18, textAlignment = "center", textColor = { white = 0.72 },
-        frame = { x = 0, y = f.h / 2 + 10, w = f.w, h = 40 } },
-      { type = "text", text = "force unlock: ⌘⌥⌃⇧U", textSize = 12, textAlignment = "center", textColor = { white = 0.32 },
-        frame = { x = 0, y = f.h - 56, w = f.w, h = 24 } }
-    )
+    local c = lockBuild(scr:fullFrame())
     c:show()
     canvases[#canvases + 1] = c
   end
+  local spin = 0
+  lockPaint(canvases, lockBoardNow(), spin)
   local buf, map = "", hs.keycodes.map
   local function setMsg(m) for _, c in ipairs(canvases) do pcall(function() c["msg"].text = m end) end end
+  setMsg(IDLE)
   local function showDots() setMsg(#buf > 0 and (string.rep("•", math.min(#buf, 28)) .. "   (⏎ to unlock)") or IDLE) end
   local tap = hs.eventtap.new({
     hs.eventtap.event.types.keyDown, hs.eventtap.event.types.keyUp, hs.eventtap.event.types.flagsChanged,
@@ -3828,9 +3924,43 @@ function FX.lockEngage()
   local rearm = hs.timer.doEvery(0.5, function()
     if lockState and lockState.tap and not lockState.tap:isEnabled() then pcall(function() lockState.tap:start() end) end
   end)
-  lockState = { canvases = canvases, tap = tap, rearm = rearm }
+  -- The animation clock. RETAINED on lockState (a bare timer is GC bait) and stopped
+  -- by lockRelease, so an unlock cannot leave it painting a deleted canvas.
+  local anim = hs.timer.doEvery(1 / 15, function()
+    if not lockState then return end
+    spin = (spin + 1) % 5400
+    lockPaint(canvases, lockBoardNow(), spin)
+  end)
+  lockState = { canvases = canvases, tap = tap, rearm = rearm, anim = anim }
   print("[cc-lock] 🔒 locked (" .. #canvases .. " screen(s))")
 end
+
+-- Look at the lock WITHOUT locking: same canvas, same paint loop, no input tap and
+-- no password. For checking the face after changing it -- engaging the real lock to
+-- see a colour would block the machine until the password is typed.
+-- Usage: hs -c "_G.__ccLockPreview(6)"
+function FX.lockPreview(seconds)
+  local canvases = {}
+  for _, scr in ipairs(hs.screen.allScreens()) do
+    local c = lockBuild(scr:fullFrame())
+    c:show()
+    canvases[#canvases + 1] = c
+  end
+  local spin = 0
+  for _, c in ipairs(canvases) do pcall(function() c["msg"].text = "Preview — not locked" end) end
+  lockPaint(canvases, lockBoardNow(), spin)
+  FX._lockPreviewAnim = hs.timer.doEvery(1 / 15, function()
+    spin = (spin + 1) % 5400
+    lockPaint(canvases, lockBoardNow(), spin)
+    for _, c in ipairs(canvases) do pcall(function() c["msg"].text = "Preview — not locked" end) end
+  end)
+  FX._lockPreviewStop = after(tonumber(seconds) or 6, function()
+    if FX._lockPreviewAnim then pcall(function() FX._lockPreviewAnim:stop() end); FX._lockPreviewAnim = nil end
+    for _, c in ipairs(canvases) do pcall(function() c:delete() end) end
+  end)
+  return #canvases
+end
+_G.__ccLockPreview = FX.lockPreview
 end  -- lock do-block
 
 local function handleBridgeMsg(msg)

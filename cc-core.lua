@@ -584,6 +584,129 @@ function M.dupProjectKeys(list)
   return dup
 end
 
+-- ---- Lockscreen board (what the lock overlay draws) -------------------------
+-- The lock is up for hours while the fleet keeps working, so the overlay answers
+-- one question at a glance: is anything running, and does anything want me? Both
+-- of these are pure; the canvas layer just draws what they return.
+
+-- A project's own colour, derived from its key alone so it is the same every time.
+-- FNV-1a plus a murmur3 finalizer: raw FNV's low bits mix poorly, and slicing them
+-- put three of eight live projects on one hue.
+local function projectHash(key)
+  local h = 2166136261
+  for i = 1, #key do
+    h = h ~ key:byte(i)
+    h = (h * 16777619) % 4294967296
+  end
+  h = h ~ (h // 65536)
+  h = (h * 2246822507) % 4294967296
+  h = h ~ (h // 8192)
+  h = (h * 3266489909) % 4294967296
+  h = h ~ (h // 65536)
+  return h
+end
+function M.projectColor(key)
+  if type(key) ~= "string" or key == "" then
+    return { hue = 0, saturation = 0, brightness = 0.75 }
+  end
+  return { hue = projectHash(key) % 360, saturation = 0.68, brightness = 1.0 }
+end
+
+-- Just the hue, for callers that only need to place a project on the wheel.
+function M.projectHue(key) return M.projectColor(key).hue end
+
+-- The colours ON SCREEN have to be tellable apart, which a per-key hash alone cannot
+-- promise: eight projects hashed onto the wheel put two of them 5 degrees apart (two
+-- identical-looking yellows), and quantising to a palette only trades that for exact
+-- collisions (eight items into twelve buckets collide more often than not). So the
+-- hash gives the base hue -- stable, and what a project shows whenever it does not
+-- clash -- and any ring landing within MIN_HUE_SEP of one already placed is rotated
+-- to the next free slot. Deterministic in the entries' sorted order, so a redraw
+-- never reshuffles the colours mid-spin.
+local MIN_HUE_SEP = 22
+local function spreadHues(entries)
+  local used = {}
+  for _, e in ipairs(entries) do
+    local h = e.color.hue
+    for _ = 0, 359, MIN_HUE_SEP do
+      local clash = false
+      for _, u in ipairs(used) do
+        local d = math.abs(h - u)
+        if math.min(d, 360 - d) < MIN_HUE_SEP then clash = true break end
+      end
+      if not clash then break end
+      h = (h + MIN_HUE_SEP) % 360
+    end
+    e.color.hue = h
+    used[#used + 1] = h
+  end
+  return entries
+end
+
+-- One ring per PROJECT that is doing something, ranked by how badly it wants you:
+-- a project waiting on approval outranks one that errored, which outranks one
+-- merely working. Two sessions in one project share a ring (and the louder of
+-- their states). Idle/done sessions draw nothing. The row is capped so a big fleet
+-- cannot overflow the screen, while `counts` stays honest about the whole fleet.
+-- Same-state rings sort alphabetically so the row cannot reshuffle between frames.
+function M.lockBoard(list, maxN)
+  local RANK = { approval = 1, error = 2, working = 3 }
+  local byProject, counts = {}, { working = 0, approval = 0, error = 0, total = 0 }
+  for _, it in ipairs(list or {}) do
+    if type(it) == "table" then
+      counts.total = counts.total + 1
+      local st = tostring(it.status or "")
+      if RANK[st] then
+        counts[st] = counts[st] + 1
+        local k = it.projectKey or it.cwd or it.name
+        if type(k) == "string" and k ~= "" then
+          local label = (type(it.label) == "string" and it.label ~= "" and it.label)
+                     or (type(it.autoTitle) == "string" and it.autoTitle ~= "" and it.autoTitle)
+                     or (type(it.name) == "string" and it.name ~= "" and it.name)
+                     or M.projectKeyLabel(k)
+          local cur = byProject[k]
+          if not cur then
+            byProject[k] = { key = k, label = label, state = st, color = M.projectColor(k) }
+          elseif RANK[st] < RANK[cur.state] then
+            cur.state = st            -- the louder state wins within one project
+          end
+        end
+      end
+    end
+  end
+  local entries = {}
+  for _, e in pairs(byProject) do entries[#entries + 1] = e end
+  table.sort(entries, function(a, b)
+    if RANK[a.state] ~= RANK[b.state] then return RANK[a.state] < RANK[b.state] end
+    local al, bl = tostring(a.label):lower(), tostring(b.label):lower()
+    if al ~= bl then return al < bl end
+    return tostring(a.key) < tostring(b.key)
+  end)
+  local cap = tonumber(maxN) or 6
+  while #entries > cap do table.remove(entries) end
+  spreadHues(entries)                        -- only the rings actually drawn compete
+  return { entries = entries, counts = counts }
+end
+
+-- The one line under the rings. Pure so every branch is testable: the canvas layer
+-- should not be the only place that knows what "nothing is running" reads like.
+function M.lockSummary(counts, ringCount)
+  counts = type(counts) == "table" and counts or {}
+  local total = tonumber(counts.total) or 0
+  local working = tonumber(counts.working) or 0
+  local approval = tonumber(counts.approval) or 0
+  local errored = tonumber(counts.error) or 0
+  if total == 0 then return "No sessions" end
+  if (tonumber(ringCount) or 0) == 0 then
+    return "All quiet  ·  " .. total .. " session" .. (total == 1 and "" or "s")
+  end
+  local parts = {}
+  if working > 0 then parts[#parts + 1] = working .. " working" end
+  if approval > 0 then parts[#parts + 1] = approval .. (approval == 1 and " needs you" or " need you") end
+  if errored > 0 then parts[#parts + 1] = errored .. " errored" end
+  return table.concat(parts, "  ·  ")
+end
+
 -- Tiles left behind by a /clear. Clearing context does NOT start a new process:
 -- the SAME claude process mints a new session id, so the retired session and its
 -- replacement are the only two tiles that can ever share one session_pid (a second

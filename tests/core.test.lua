@@ -5710,6 +5710,126 @@ do
   check("superseded: nil list is safe", #K(nil) == 0)
 end
 
+-- ---- Lockscreen board: what the lock overlay draws while you are away --------
+-- 2026-09-04: the lock was a padlock on a flat rectangle. It now shows a spinning
+-- ring per PROJECT that is doing something, so a glance says whether the fleet is
+-- busy, blocked or idle without unlocking.
+do
+  -- projectColor: a project's base colour comes from its key alone and never moves
+  local KEY = "-Users-adam-Programming-ChargebackSentinel"
+  local c1 = core.projectColor(KEY)
+  eq("colour: stable across calls", core.projectColor(KEY).hue, c1.hue)
+  check("colour: hue is on the wheel", c1.hue >= 0 and c1.hue < 360)
+  check("colour: readable on a dark screen", c1.brightness >= 0.8 and c1.saturation > 0)
+  eq("colour: projectHue is the colour's hue", core.projectHue(KEY), c1.hue)
+  eq("colour: non-string is safe", core.projectHue(nil), 0)
+  check("colour: near-identical keys separate",
+        core.projectColor("-Users-adam-Programming-proj1").hue
+        ~= core.projectColor("-Users-adam-Programming-proj2").hue)
+
+  -- THE property that matters: the rings actually DRAWN must be tellable apart.
+  -- A per-key hash alone cannot promise this -- the real fleet hashed two projects
+  -- 5 degrees apart (two identical yellows), which is what sent this back.
+  local function sep(entries)
+    local worst = 999
+    for i = 1, #entries do
+      for j = i + 1, #entries do
+        local d = math.abs(entries[i].color.hue - entries[j].color.hue)
+        worst = math.min(worst, math.min(d, 360 - d))
+      end
+    end
+    return worst
+  end
+  local fleet = {}
+  for _, k in ipairs({ "-Users-adam-Programming-ChargebackSentinel", "-Users-adam-Programming-Voice-Agent",
+                       "-Users-adam-Programming-wgsUltra", "-Users-adam-Programming-claude-instance-manager",
+                       "-Users-adam-Programming-Scratch-pad", "-Users-adam-Programming-canary" }) do
+    fleet[#fleet + 1] = { projectKey = k, name = k, status = "working" }
+  end
+  local fb = core.lockBoard(fleet, 6)
+  eq("colour: the live fleet draws six rings", #fb.entries, 6)
+  check("colour: every drawn ring is 22+ degrees from every other", sep(fb.entries) >= 22)
+  -- adversarial: projects whose hues all collide are still spread apart on screen
+  local same = {}
+  for i = 1, 6 do same[i] = { projectKey = "dup", name = "p" .. i, status = "working" } end
+  same[1].projectKey = "dupA"; same[2].projectKey = "dupB"; same[3].projectKey = "dupC"
+  same[4].projectKey = "dupD"; same[5].projectKey = "dupE"; same[6].projectKey = "dupF"
+  for _, e in ipairs(same) do e.forcedHue = true end
+  local sb = core.lockBoard(same, 6)
+  check("colour: a crowded wheel still separates every ring", sep(sb.entries) >= 22)
+  -- deterministic: the same fleet paints the same colours on every frame
+  local again = core.lockBoard(fleet, 6)
+  local drift = 0
+  for i = 1, #fb.entries do if fb.entries[i].color.hue ~= again.entries[i].color.hue then drift = drift + 1 end end
+  eq("colour: redraws do not reshuffle the ring colours", drift, 0)
+  -- a project that clashes with nobody keeps the colour its key gives it
+  local solo = core.lockBoard({ { projectKey = KEY, name = "cs", status = "working" } }, 6)
+  eq("colour: an uncontested ring keeps its own hue", solo.entries[1].color.hue, core.projectHue(KEY))
+
+  -- lockSummary: the line under the rings, every branch pinned (the canvas cannot
+  -- be the only place that knows what an idle fleet reads like)
+  local S = core.lockSummary
+  eq("summary: nothing at all", S({ total = 0 }, 0), "No sessions")
+  eq("summary: idle fleet is quiet, not empty", S({ total = 4 }, 0), "All quiet  ·  4 sessions")
+  eq("summary: one idle session is singular", S({ total = 1 }, 0), "All quiet  ·  1 session")
+  eq("summary: working only", S({ total = 5, working = 3 }, 3), "3 working")
+  eq("summary: blocked reads as needing you", S({ total = 5, approval = 1 }, 1), "1 needs you")
+  eq("summary: two blocked agree in number", S({ total = 5, approval = 2 }, 2), "2 need you")
+  eq("summary: the full picture", S({ total = 9, working = 4, approval = 2, error = 1 }, 6),
+     "4 working  ·  2 need you  ·  1 errored")
+  eq("summary: junk counts are safe", S(nil, 0), "No sessions")
+
+  -- lockBoard: one ring per PROJECT, ranked by how much it wants you
+  local B = core.lockBoard
+  local list = {
+    { projectKey = "pA", name = "alpha",  status = "working" },
+    { projectKey = "pA", name = "alpha",  status = "working" },   -- same project, one ring
+    { projectKey = "pB", name = "bravo",  status = "approval" },
+    { projectKey = "pC", name = "charlie", status = "error" },
+    { projectKey = "pD", name = "delta",  status = "done" },      -- idle: no ring
+    { projectKey = "pE", name = "echo",   status = "idle" },
+  }
+  local b = B(list, 8)
+  eq("board: one ring per project, idle ones dropped", #b.entries, 3)
+  eq("board: approval outranks error outranks working",
+     b.entries[1].state .. "," .. b.entries[2].state .. "," .. b.entries[3].state, "approval,error,working")
+  eq("board: the ring is labelled for the project", b.entries[1].label, "bravo")
+  -- Rings are per PROJECT; counts are per SESSION. The row answers "which projects
+  -- are busy", the summary answers "how much is running" -- so pA's two working
+  -- sessions share one ring but count twice.
+  eq("board: counts are per session, not per ring", b.counts.working, 2)
+  eq("board: approval count", b.counts.approval, 1)
+  eq("board: error count", b.counts.error, 1)
+  eq("board: every session counted, ringed or not", b.counts.total, 6)
+  check("board: each ring carries its project's colour", b.entries[1].color.hue == core.projectHue("pB"))
+  -- a project that is BOTH working and blocked reads as blocked (the louder state)
+  local mixed = B({ { projectKey = "pX", name = "x", status = "working" },
+                    { projectKey = "pX", name = "x", status = "approval" } }, 8)
+  eq("board: the louder state wins within a project", #mixed.entries, 1)
+  eq("board: ...and that state is approval", mixed.entries[1].state, "approval")
+  -- ties are alphabetical, so the row does not reshuffle between frames
+  local tie = B({ { projectKey = "p2", name = "zeta", status = "working" },
+                  { projectKey = "p1", name = "alpha", status = "working" } }, 8)
+  eq("board: same-state rings sort alphabetically", tie.entries[1].label, "alpha")
+  -- a relabel/auto-title wins the label, then the folder name, then the derived key
+  eq("board: a relabel names the ring",
+     B({ { projectKey = "pk", name = "folder", label = "My Label", status = "working" } }, 8).entries[1].label,
+     "My Label")
+  eq("board: falls back to the key's readable form",
+     B({ { projectKey = "-Users-adam-Programming-qb", status = "working" } }, 8).entries[1].label, "qb")
+  -- the row is capped so a big fleet cannot overflow the screen, but the COUNT is honest
+  local many = {}
+  for i = 1, 12 do many[i] = { projectKey = "k" .. i, name = "n" .. i, status = "working" } end
+  local capped = B(many, 6)
+  eq("board: ring row is capped", #capped.entries, 6)
+  eq("board: ...while the count stays truthful", capped.counts.working, 12)
+  -- nothing running is its own state, not an error
+  local quiet = B({ { projectKey = "pD", name = "d", status = "done" } }, 6)
+  eq("board: an all-idle fleet draws no rings", #quiet.entries, 0)
+  eq("board: ...and still counts the sessions", quiet.counts.total, 1)
+  check("board: nil list is safe", #B(nil, 6).entries == 0)
+end
+
 -- ---- User stories editor: parse / serialize / hash (spec/product/user-stories.md) ----
 do
   -- THE core safety invariant: serialize(parse(x).blocks) == x BYTE-FOR-BYTE for any
