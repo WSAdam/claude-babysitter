@@ -4,6 +4,38 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — Windows, keystrokes and spawns never land in a sibling's window
+
+### Fixed — prefix-named siblings (and worktrees) stealing a project's window
+
+Window matching accepted a folder segment that merely **contained** the project's name, then
+fell back to the name as a substring **anywhere** in a window title. Prefix-named siblings got
+hit whenever the project's own title wasn't an exact match — the log shows a `/rc` paste meant
+for `Dialer-info-unify` landing in `Dialer-info-Five9` (via the ancestor name `dialer`), and
+Jumps to `Dialer-info` focusing `-Five9`. The parallel-worktree workflow (`../repo-fix-y`) makes
+prefix siblings the norm, and every keystroke path shares this matcher, so approvals, nudges,
+`/clear` and ⌘⇧W could reach the wrong session.
+
+- A folder segment now matches only **exactly**, or as the name plus a decoration —
+  `myapp (Workspace)`, `myapp [SSH: box]` — never `myapp-fix-y`, `old-myapp` or `myapp 2`.
+- The fallback matches the raw name only at the editor's folder position (the last segment;
+  any segment, exact, for Terminal.app, which leads with the folder). A folder named `project`
+  no longer matches `project-fix-y`, a home-launched `adam` session no longer matches
+  `adam-settings`, and no project matches a window because a file or chat title mentions it.
+- A spawn never accepts its parent folder's window while waiting for its own (ancestors are
+  skipped on the spawn ladder and in the "does a window exist" check).
+- kitty's folder fallback is anchored and quoted (`cwd:"^/path$"`); a folder kitty's match
+  syntax can't express exactly is untargetable rather than loosely matched.
+- Deck Voice inherits the stricter rank, so dictation never routes to a prefix sibling.
+
+A matching miss now fails closed: Jump activates the editor, keystroke paths skip. Titles that
+relied on the loose match — a `<folder>-something (Workspace)` workspace, VS Code profile
+suffixes — no longer match their folder.
+
+*Implementation note:* `focusProject` and `FX.hasEditorWindowFor` now share one pure matcher,
+`core.pickWindow`, fixture-tested with the logged field cases. Two tests that pinned the old
+contains tier, and the bare kitty `cwd:` selector, were rewritten as dated requirement changes.
+
 ## 2026-08-21 — A spawned editor window inherits the size you already use
 
 ### Added — `spawn.matchWindowSize` (on by default)

@@ -5355,6 +5355,18 @@ end
 --   close -> @ [--to S] close-window --match SEL
 --   key   -> @ [--to S] send-key   --match SEL <token...>
 --   text  -> @ [--to S] send-text  --match SEL -- <text>
+-- kitty's --match fallback for a session with no window id: that EXACT folder.
+-- The cwd query is a regex searched anywhere, so a bare "cwd:/p" also hit /p-fix-y
+-- siblings and shells cd'd into a subfolder (2026-09-10): anchor it, and quote it
+-- because the match syntax splits on spaces ("VO App"). kitty's own parser rewrites
+-- \\ \" \( \) inside a query, so a folder holding one of those can't be expressed
+-- exactly -- untargetable (nil) rather than a looser match.
+function M.kittyCwdSelector(cwd)
+  if type(cwd) ~= "string" or cwd == "" then return nil end
+  if cwd:find('[\\"()]') then return nil end
+  return 'cwd:"^' .. M.escapeSearchPattern(cwd) .. '$"'
+end
+
 function M.kittyCmd(action, item, payload)
   item = item or {}
   payload = payload or {}
@@ -5362,7 +5374,8 @@ function M.kittyCmd(action, item, payload)
   if item.kitty_window_id and tostring(item.kitty_window_id) ~= "" then
     sel = "id:" .. tostring(item.kitty_window_id)
   elseif item.cwd and item.cwd ~= "" then
-    sel = "cwd:" .. tostring(item.cwd)
+    sel = M.kittyCwdSelector(tostring(item.cwd))
+    if not sel then return nil end  -- a folder kitty's match syntax can't express exactly
   else
     return nil  -- nothing to target
   end
@@ -5440,29 +5453,36 @@ M.FOCUS_SKIP = { users = true, programming = true, desktop = true, documents = t
   projects = true, project = true, src = true, code = true, repos = true, repo = true,
   dev = true, home = true, [""] = true }
 
+-- Rank ONE title segment against an already-lowercased needle (shared by the
+-- folder-segment rank below and pickWindow's Terminal pass).
+--   2 = the segment IS the needle (trimmed)
+--   1 = the needle plus a decoration: "myapp (Workspace)", "myapp [SSH: box]"
+--   nil = anything else -- "myapp-fix-y", "old-myapp", "myapp2", "my app 2"
+-- A segment holding a path is judged on its last component ("~/p/myapp").
+local function segRank(seg, needle)
+  seg = string.lower(seg or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if seg:find("/", 1, true) then seg = seg:match("([^/]*)/*$") or seg end
+  if seg == needle then return 2 end
+  if seg:sub(1, #needle) == needle and seg:sub(#needle + 1):find("^%s*[%(%[]") then return 1 end
+  return nil
+end
+
 -- Rank a window title's folder segment (after the last em-dash) against a
 -- focus candidate. VS Code titles are "<file> — <folder>"; matching the folder
 -- avoids grabbing a window whose task title merely mentions the word.
---   2 = the segment IS the candidate (exact, trimmed)
---   1 = the segment merely CONTAINS it
---   nil = no match
--- The two tiers exist because prefix-named sibling projects collide under a
--- bare substring test (field-proven: "Dialer-info"'s Jump matched the
--- "… — Dialer-info-Five9" window, and the cwd-ancestor candidate "dialer"
--- matched "… — Dialer-scraper"). Callers must prefer rank 2 across ALL
--- windows before settling for a rank-1 contains-match (decorated titles like
--- "proj (Workspace)" still need the fallback) -- bestWindowFor below does that.
+-- 2026-09-10: rank 1 used to be "the segment CONTAINS the needle", which let a
+-- prefix-named sibling win whenever the project's own title wasn't exact --
+-- logged: a /rc paste for Dialer-info-unify focused "… — Dialer-info-Five9" via
+-- the ancestor needle "dialer", and Jumps to Dialer-info landed on -Five9. With
+-- worktrees (../repo-fix-y) prefix siblings are the norm, so rank 1 is now ONLY
+-- the decorated form (see segRank). bestWindowFor still prefers rank 2 across
+-- all windows before settling for a decorated one.
 -- Case-insensitive on BOTH sides (self-contained: callers historically
 -- pre-lowercased, but the function must not silently depend on it).
 function M.titleFolderRank(title, needle)
   if not title or not needle or needle == "" then return nil end
-  title = string.lower(title)
-  needle = string.lower(needle)
-  local seg = title:match(".*—%s*(.+)$") or title
-  seg = seg:gsub("^%s+", ""):gsub("%s+$", "")
-  if seg == needle then return 2 end
-  if seg:find(needle, 1, true) then return 1 end
-  return nil
+  local lt = string.lower(title)
+  return segRank(lt:match(".*—%s*(.+)$") or lt, string.lower(needle))
 end
 
 -- Boolean convenience over titleFolderRank (legacy shape).
@@ -5506,6 +5526,43 @@ function M.focusCandidates(name, cwd, skipUser, skip)
     for i = #parts - 1, 1, -1 do add(parts[i]) end  -- ancestors, deepest first
   end
   return out
+end
+
+-- The ONE window matcher behind focusProject (every Jump and keystroke path, and the
+-- spawn ladder) and FX.hasEditorWindowFor. Pure: window titles in, index out.
+-- Returns idx, how, needle -- how is "exact"/"folder" (pass 1, a focus candidate
+-- against the folder segment) or "loose" (pass 2, the raw name) -- or nil.
+--   opts.ancestors = false: skip the cwd's parent folders as candidates. Spawns pass
+--     it -- a spawn waiting for Dialer-info-Five9 must never accept the Dialer window.
+--   opts.editor = "terminal": Terminal.app leads with the folder ("myapp — claude —
+--     120×40"), so pass 2 accepts any segment, exact only.
+-- 2026-09-10: pass 2 used to be the name as a substring ANYWHERE in the title, so a
+-- folder named "project" (no pass-1 candidate) matched "… — project-fix-y", a home
+-- session "adam" matched "adam-settings", and any name matched another window's
+-- file or chat title. It now matches only at the editor's folder position.
+function M.pickWindow(titles, name, cwd, user, opts)
+  opts = opts or {}
+  titles = titles or {}
+  local anc = (opts.ancestors ~= false) and cwd or nil
+  for _, needle in ipairs(M.focusCandidates(name, anc, user)) do
+    local idx, rank = M.bestWindowFor(titles, needle)
+    if idx then return idx, (rank == 2) and "exact" or "folder", needle end
+  end
+  -- pass 2: the raw name -- rescues FOCUS_SKIP names ("project") and a
+  -- home-launched $USER session, which have no pass-1 candidate at all
+  local raw = string.lower(name or "")
+  if raw == "" then return nil end
+  if opts.editor == "terminal" then
+    for i, t in ipairs(titles) do
+      for seg in (string.lower(t or "") .. "—"):gmatch("(.-)—") do
+        if segRank(seg, raw) == 2 then return i, "loose", raw end
+      end
+    end
+    return nil
+  end
+  local idx = M.bestWindowFor(titles, raw)
+  if idx then return idx, "loose", raw end
+  return nil
 end
 
 -- Reverse window match: which session owns the window titled `title`? Used by the deck's

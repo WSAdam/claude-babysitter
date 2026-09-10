@@ -297,7 +297,7 @@ end
 -- pasteIntoWindow / sendKeys) skip injection on a miss -- activating the app
 -- there would yank the user's focus to the editor and abandon it (their typing
 -- lands in the wrong app, and the early return never restores prev focus).
-local function focusProject(name, cwd, editor, activateOnMiss)
+local function focusProject(name, cwd, editor, activateOnMiss, opts)
   print("[cc-dashboard] focus request: " .. tostring(name))
   local app = findEditorApp(editor)
   if not app then
@@ -306,33 +306,18 @@ local function focusProject(name, cwd, editor, activateOnMiss)
     return false
   end
   local windows = app:allWindows()
-  local candidates = core.focusCandidates(name, cwd, os.getenv("USER"))
-
-  -- Pass 1: per candidate, pick the best-RANKED window (core.bestWindowFor:
-  -- exact folder segment beats contains across ALL windows -- the
-  -- prefix-named-sibling fix; rationale on titleFolderRank).
+  -- One matcher for every caller (core.pickWindow, pure + tested): the focus
+  -- candidates against each window's folder segment first, then the raw name.
+  -- opts.ancestors=false (spawns) skips the cwd's parent folders as candidates.
   local titles = {}
   for i, w in ipairs(windows) do titles[i] = w:title() or "" end
-  for _, needle in ipairs(candidates) do
-    local idx, rank = core.bestWindowFor(titles, needle)
-    if idx then
-      windows[idx]:focus()
-      print("[cc-dashboard] focused (folder" .. (rank == 2 and ", exact" or "") .. ": "
-        .. needle .. "): " .. (titles[idx] or "?"))
-      return true
-    end
-  end
-  -- Pass 2: loose substring match on the name only (original fallback behavior).
-  local needle = string.lower(name or "")
-  if needle ~= "" then
-    for _, w in ipairs(windows) do
-      local title = string.lower(w:title() or "")
-      if title ~= "" and title:find(needle, 1, true) then
-        w:focus()
-        print("[cc-dashboard] focused (loose): " .. (w:title() or "?"))
-        return true
-      end
-    end
+  local idx, how, needle = core.pickWindow(titles, name, cwd, os.getenv("USER"),
+    { editor = editor, ancestors = not (opts and opts.ancestors == false) })
+  if idx then
+    windows[idx]:focus()
+    print("[cc-dashboard] focused (" .. tostring(how) .. ": " .. tostring(needle) .. "): "
+      .. (titles[idx] or "?"))
+    return true
   end
   if activateOnMiss then
     app:activate()
@@ -2907,16 +2892,10 @@ function FX.hasEditorWindowFor(name, cwd, editor)
   if not okApp or not app then return false end
   local titles = {}
   for i, w in ipairs(app:allWindows() or {}) do titles[i] = (w:title() or "") end
-  for _, needle in ipairs(core.focusCandidates(name, cwd, os.getenv("USER"))) do
-    if core.bestWindowFor(titles, needle) then return true end
-  end
-  local needle = string.lower(name or "")
-  if needle ~= "" then
-    for _, t in ipairs(titles) do
-      if t ~= "" and string.lower(t):find(needle, 1, true) then return true end
-    end
-  end
-  return false
+  -- Spawn-only (willCreate): the same matcher as focusProject, minus ancestor
+  -- folders -- a spawn must never count its PARENT folder's window as its own.
+  return core.pickWindow(titles, name, cwd, os.getenv("USER"),
+    { editor = editor, ancestors = false }) ~= nil
 end
 
 -- Put the just-spawned window on `frame`. Best-effort by design: a window that
@@ -2961,6 +2940,9 @@ local function spawnEditorWindow(spec)
     injectionTailAt, hs.timer.absoluteTime() / 1e9, core.spawnLadderWorst(spec))
   local proj = spec.project
   local name = proj and proj:match("([^/]+)/?$") or nil
+  -- Every window match in this ladder skips ancestor folders (core.pickWindow): a
+  -- spawn waiting for its own window must never accept its PARENT folder's window.
+  local spawnMatch = { ancestors = false }
   -- Both of these MUST be decided before `open` runs. Afterwards the project has a
   -- window either way (so "will it create one" is unanswerable), and the new window
   -- is frontmost (so we'd copy its full-width frame onto itself).
@@ -2994,7 +2976,7 @@ local function spawnEditorWindow(spec)
         -- the task then would submit the operator's prompt into whatever window came
         -- to front (a different project). Best-effort ⌘1/⌘Esc panel-open is harmless
         -- on the activated app, but the task is only delivered on a real match.
-        local matched = focusProject(name, proj, spec.editor, true)
+        local matched = focusProject(name, proj, spec.editor, true, spawnMatch)
         -- Re-assert: VS Code restores its remembered geometry during startup, which
         -- lands AFTER the first sizing on a cold window. Cheap and idempotent.
         if matched then FX.applySpawnFrame(wantFrame, frameWhy) end
@@ -3016,7 +2998,7 @@ local function spawnEditorWindow(spec)
             -- silently clobber it (once per A/B variant otherwise).
             local prevClip = hs.pasteboard.readString()
             sched(2.0, function()
-              local matched2 = focusProject(name, proj, spec.editor, true)  -- re-assert (Welcome/trust may have stolen focus)
+              local matched2 = focusProject(name, proj, spec.editor, true, spawnMatch)  -- re-assert (Welcome/trust may have stolen focus)
               if matched2 == false then
                 print("[cc-orch] vscode cold-start: no window match on re-assert -- task NOT delivered")
                 return
@@ -3039,7 +3021,7 @@ local function spawnEditorWindow(spec)
       local function poll()
         -- focusProject(...,false) both reports a real title match AND focuses on hit;
         -- core.coldStartStep (pure, tested) owns the bounded open/wait/giveup decision.
-        local step = core.coldStartStep(focusProject(name, proj, spec.editor, false), elapsed, waitMax)
+        local step = core.coldStartStep(focusProject(name, proj, spec.editor, false, spawnMatch), elapsed, waitMax)
         if step == "open" then  -- window appeared + got focused
           print(string.format("[cc-orch] vscode cold-start: window seen after ~%.0fs; waiting %ss for the extension to activate", elapsed, activate))
           -- Size it now, while we know the just-matched window holds focus. Only the
@@ -3070,7 +3052,7 @@ local function spawnEditorWindow(spec)
     -- R3-07: offset the first beat by spawnDelay so the whole ladder runs in its
     -- reserved injection-tail slot (queued behind any in-flight dispatch chain).
     local beats = { { delay = 3.0 + spawnDelay, fn = function()
-        warmMatched = focusProject(name, proj, spec.editor, true)
+        warmMatched = focusProject(name, proj, spec.editor, true, spawnMatch)
         -- A REOPEN lands here, not on the cold path: spec.coldStart only marks a
         -- brand-new project, so closing a window and reopening the same project
         -- takes the warm ladder while still creating a window. Size it, but only
@@ -3082,7 +3064,7 @@ local function spawnEditorWindow(spec)
         -- task beats below keep their timing. A reopen usually has its window by the
         -- 3s beat (the app is already running), but a slower one lands by now.
         if wantFrame and warmMatched ~= true then
-          warmMatched = focusProject(name, proj, spec.editor, true)
+          warmMatched = focusProject(name, proj, spec.editor, true, spawnMatch)
         end
         if warmMatched then FX.applySpawnFrame(wantFrame, frameWhy) end
         print("[cc-orch] vscode: opening the Claude Code extension (⌘Esc)")
@@ -3095,7 +3077,7 @@ local function spawnEditorWindow(spec)
         -- began could have stolen focus; re-confirming the target window here (and
         -- gating the paste on the result) means a miss skips rather than ⌘V-ing the
         -- task into the wrong window. Mirrors the cold-start re-assert.
-        warmMatched = focusProject(name, proj, spec.editor, true)
+        warmMatched = focusProject(name, proj, spec.editor, true, spawnMatch)
         if warmMatched == false then
           print("[cc-orch] vscode warm: no window match -- task NOT delivered")
           return
@@ -3130,7 +3112,7 @@ local function spawnEditorWindow(spec)
   local function termDriveBeats(initialDelay)
     return {
       { delay = initialDelay, fn = function()
-          termMatched = focusProject(name, proj, spec.editor, true)
+          termMatched = focusProject(name, proj, spec.editor, true, spawnMatch)
         end },
       { delay = 0.8, fn = function()
           if termMatched == false then
@@ -3154,7 +3136,7 @@ local function spawnEditorWindow(spec)
           -- ANTHROPIC_* env). A dispatch in flight when the spawn began could have
           -- stolen focus; re-confirm the target window and skip on a miss rather
           -- than typing the launch line into the wrong window.
-          termMatched = focusProject(name, proj, spec.editor, true)
+          termMatched = focusProject(name, proj, spec.editor, true, spawnMatch)
           if termMatched == false then
             print("[cc-orch] vscode terminal: no window match on re-assert -- launch line NOT delivered")
             return
@@ -3178,7 +3160,7 @@ local function spawnEditorWindow(spec)
     local function sched(d, fn) spawnSeqHandlesByKey[ladderKey] = { after(d, fn) }; return spawnSeqHandlesByKey[ladderKey] end
     local elapsed = 0
     local function poll()
-      local step = core.coldStartStep(focusProject(name, proj, spec.editor, false), elapsed, waitMax)
+      local step = core.coldStartStep(focusProject(name, proj, spec.editor, false, spawnMatch), elapsed, waitMax)
       if step == "open" then
         print(string.format("[cc-orch] vscode terminal cold-start: window seen after ~%.0fs; waiting %ss to activate", elapsed, activate))
         sched(activate, function()

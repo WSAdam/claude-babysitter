@@ -726,8 +726,11 @@ do
         src:find("if spec.coldStart == true then", 1, true) ~= nil)
   check("spawn-pin: cold-start polls for the window (focusProject false) before opening the panel",
         -- R2-09: the editor is threaded through (spec.editor), never nil, so a Cursor
-        -- spawn can't resolve to a VS Code window.
-        src:find("focusProject(name, proj, spec.editor, false)", 1, true) ~= nil
+        -- spawn can't resolve to a VS Code window. REQUIREMENT CHANGE 2026-09-10: the
+        -- call also carries spawnMatch (no ancestor folders) -- a spawn waiting for
+        -- Dialer-info-Five9 must never accept the parent Dialer window.
+        src:find("focusProject(name, proj, spec.editor, false, spawnMatch)", 1, true) ~= nil
+        and src:find("local spawnMatch = { ancestors = false }", 1, true) ~= nil
         and src:find("focusProject(name, proj, nil, false)", 1, true) == nil
         and src:find("cold-start: window seen after", 1, true) ~= nil)
   check("spawn-pin: cold-start poll is BOUNDED via pure core.coldStartStep (giveup, can't hang)",
@@ -1476,9 +1479,20 @@ do
         src:find("delay = 3.0 + spawnDelay", 1, true) ~= nil
         and src:find("termDriveBeats(3.0 + spawnDelay)", 1, true) ~= nil
         and src:find("sched(2.0 + spawnDelay, poll)", 1, true) ~= nil)
+  -- REQUIREMENT CHANGE 2026-09-10: the re-assert calls also carry spawnMatch (no
+  -- ancestor folders); the pinned behaviour -- re-assert, then gate on the result -- is unchanged.
   check("r3-07-pin: warm + terminal task beats re-assert focus before paste/type",
-        src:find("warmMatched = focusProject(name, proj, spec.editor, true)\n        if warmMatched == false then", 1, true) ~= nil
-        and src:find("termMatched = focusProject(name, proj, spec.editor, true)\n          if termMatched == false then\n            print(\"[cc-orch] vscode terminal: no window match on re-assert", 1, true) ~= nil)
+        src:find("warmMatched = focusProject(name, proj, spec.editor, true, spawnMatch)\n        if warmMatched == false then", 1, true) ~= nil
+        and src:find("termMatched = focusProject(name, proj, spec.editor, true, spawnMatch)\n          if termMatched == false then\n            print(\"[cc-orch] vscode terminal: no window match on re-assert", 1, true) ~= nil)
+  -- Every window match in the spawn ladder skips ancestors: no unthreaded call survives.
+  check("sibling-pin: no spawn-ladder focusProject call can accept a parent folder's window",
+        src:find("focusProject(name, proj, spec.editor, true)", 1, true) == nil
+        and src:find("focusProject(name, proj, spec.editor, false)", 1, true) == nil)
+  -- One matcher: focusProject and hasEditorWindowFor both delegate to core.pickWindow.
+  check("sibling-pin: focusProject and hasEditorWindowFor share core.pickWindow",
+        src:find("local idx, how, needle = core.pickWindow(titles, name, cwd, os.getenv(\"USER\"),", 1, true) ~= nil
+        and src:find("return core.pickWindow(titles, name, cwd, os.getenv(\"USER\"),\n    { editor = editor, ancestors = false }) ~= nil", 1, true) ~= nil
+        and src:find("title:find(needle, 1, true) then", 1, true) == nil)
   -- #5 PR/MR status per tile (gh-backed, status-only)
   check("l5pr-pin: gh self-gates (resolveBin, absent -> false)",
         src:find("ghBinPath = (p and hs.fs.attributes(p)) and p or false", 1, true) ~= nil)

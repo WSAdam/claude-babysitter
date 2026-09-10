@@ -2175,7 +2175,9 @@ do
   local ns = core.kittyCmd("focus", { kitty_window_id = "9", cwd = "/p" }, {})
   eq("kittyCmd: no socket -> no --to", ns[2], "focus-window")
   eq("kittyCmd: no socket selector", ns[4], "id:9")
-  eq("kittyCmd: cwd fallback selector", core.kittyCmd("focus", { cwd = "/proj" }, {})[#core.kittyCmd("focus", { cwd = "/proj" }, {})], "cwd:/proj")
+  -- REQUIREMENT CHANGE 2026-09-10: the bare "cwd:/proj" was an unanchored kitty regex
+  -- that also hit /proj-fix-y siblings and subfolder shells; anchored + quoted now.
+  eq("kittyCmd: cwd fallback selector", core.kittyCmd("focus", { cwd = "/proj" }, {})[#core.kittyCmd("focus", { cwd = "/proj" }, {})], 'cwd:"^/proj$"')
   eq("kittyCmd: untargetable -> nil", core.kittyCmd("focus", {}, {}), nil)
   eq("kittyCmd: unknown action -> nil", core.kittyCmd("bogus", it, {}), nil)
 
@@ -2211,10 +2213,12 @@ do
   -- so prefix-named sibling projects can't steal each other's windows
   eq("titleRank: exact folder segment = 2",
      core.titleFolderRank("claude code — dialer-info", "dialer-info"), 2)
-  eq("titleRank: prefix-sibling is only contains = 1",
-     core.titleFolderRank("claude code — dialer-info-five9", "dialer-info"), 1)
-  eq("titleRank: ancestor vs sibling project = 1 (never exact)",
-     core.titleFolderRank("x — dialer-scraper", "dialer"), 1)
+  -- REQUIREMENT CHANGE 2026-09-10: these two pinned the contains tier (= 1), which
+  -- WAS the sibling bug -- rank 1 is kept only for a decorated "(…)"/"[…]" form.
+  eq("titleRank: a prefix-named sibling never matches",
+     core.titleFolderRank("claude code — dialer-info-five9", "dialer-info"), nil)
+  eq("titleRank: an ancestor name never matches a sibling project",
+     core.titleFolderRank("x — dialer-scraper", "dialer"), nil)
   eq("titleRank: ancestor's own window = 2",
      core.titleFolderRank("x — dialer", "dialer"), 2)
   eq("titleRank: decorated title still contains-matches",
@@ -2263,6 +2267,90 @@ do
   eq("focusCands: parent next (basename excluded)", cands[2], "autobottom")
   local joined = "," .. table.concat(cands, ",") .. ","
   check("focusCands: skips generics + user", not joined:find(",programming,") and not joined:find(",adam,") and not joined:find(",users,"))
+end
+
+-- ---- Sibling worktrees never steal a window (2026-09-10) -------------------
+-- Cause: a contains-match on the folder segment, plus a whole-title substring
+-- fallback, let one project's jump/keys land in a prefix-named sibling. Logged
+-- 2026-06-13 09:54:40: a /rc paste for Dialer-info-unify focused "… — Dialer-info-Five9"
+-- via the ancestor needle "dialer"; Jumps to Dialer-info at 10:14:48/52 and 10:18:16
+-- landed on -Five9 too. Worktrees (../repo-fix-y) make prefix siblings the norm.
+do
+  local U = "adam"
+  -- (a) jumps and keystrokes never land in a prefix-named sibling's window
+  eq("pickWindow: a jump to Dialer-info never lands on Dialer-info-Five9",
+     core.pickWindow({ "claude code — Dialer-info-Five9" }, "Dialer-info",
+                     "/Users/adam/Programming/Dialer/Dialer-info", U), nil)
+  eq("pickWindow: the logged /rc paste for Dialer-info-unify finds no window in -Five9",
+     core.pickWindow({ "can you continue? — Dialer-info-Five9" }, "Dialer-info-unify",
+                     "/Users/adam/Programming/Dialer/Dialer-info-unify", U), nil)
+  eq("pickWindow: a decorated own window beats a prefix sibling listed first",
+     core.pickWindow({ "x — Dialer-info-Five9", "x — Dialer-info (Workspace)" }, "Dialer-info",
+                     "/Users/adam/Programming/Dialer/Dialer-info", U), 2)
+  eq("pickWindow: a decorated own window beats a prefix sibling listed second",
+     core.pickWindow({ "x — Dialer-info (Workspace)", "x — Dialer-info-Five9" }, "Dialer-info",
+                     "/Users/adam/Programming/Dialer/Dialer-info", U), 1)
+  eq("pickWindow: an A/B variant folder never captures its repo's jump",
+     core.pickWindow({ "x — canna-better-c123-opus" }, "Canna-better",
+                     "/Users/adam/Programming/Canna-better", U), nil)
+  eq("titleRank: 'My App 2' is not a decorated 'My App'", core.titleFolderRank("x — My App 2", "my app"), nil)
+  eq("titleRank: a remote suffix still counts as decoration", core.titleFolderRank("x — myapp [SSH: box]", "myapp"), 1)
+  -- guards: a subfolder session still reaches the window rooted at its parent
+  eq("pickWindow: a subfolder session still finds its parent's window (autobottom/frontend)",
+     core.pickWindow({ "main.ts — autobottom" }, "frontend",
+                     "/Users/adam/Programming/autobottom/frontend", U), 1)
+  eq("pickWindow: alfred still finds Alfred-rafa through its ancestor, exactly",
+     core.pickWindow({ "x — Alfred-rafa" }, "alfred", "/Users/adam/Programming/Alfred-rafa/alfred", U), 1)
+
+  -- (b) the fallback never picks a window because another project's tab mentions the name
+  eq("pickWindow: the fallback never matches a name inside another window's file tab",
+     core.pickWindow({ "myapp.md — other" }, "myapp", "/p/myapp", U), nil)
+  eq("pickWindow: the fallback never matches a name inside another window's chat title",
+     core.pickWindow({ "Fix myapp login — other" }, "myapp", "/p/myapp", U), nil)
+
+  -- (c) a generic folder or a home-launched session matches only its own window
+  eq("pickWindow: a folder named project never matches project-fix-y",
+     core.pickWindow({ "x — project-fix-y" }, "project", "/Users/adam/Programming/project", U), nil)
+  eq("pickWindow: a folder named project still finds its own window",
+     core.pickWindow({ "x — project-fix-y", "x — project" }, "project", "/Users/adam/Programming/project", U), 2)
+  eq("pickWindow: a home-launched session never matches adam-settings or adamPersonal",
+     core.pickWindow({ "x — adam-settings", "y — adamPersonal" }, "adam", "/Users/adam", U), nil)
+  eq("pickWindow: a home-launched session still finds the window rooted at home",
+     core.pickWindow({ "x — adam-settings", "x — adam" }, "adam", "/Users/adam", U), 2)
+
+  -- (d) kitty's folder fallback targets that exact folder only
+  local function kSel(cwd) local a = core.kittyCmd("focus", { cwd = cwd }, {}); return a and a[#a] end
+  eq("kittyCmd: the cwd fallback is anchored to that exact folder", kSel("/proj"), 'cwd:"^/proj$"')
+  eq("kittyCmd: a folder with a space stays one quoted query", kSel("/Users/adam/Programming/VO App"),
+     'cwd:"^/Users/adam/Programming/VO App$"')
+  eq("kittyCmd: regex characters in the folder are escaped", kSel("/a/b.c+d"), 'cwd:"^/a/b\\.c\\+d$"')
+  eq("kittyCmd: a folder with a double quote is untargetable", kSel('/a/we"ird'), nil)
+  eq("kittyCmd: a folder with parentheses is untargetable", kSel("/a/(x)"), nil)
+  eq("kittyCmd: a folder with a backslash is untargetable", kSel("/a/b\\c"), nil)
+  eq("kittyCmd: a window id still wins over the folder", core.kittyCmd("focus", { kitty_window_id = "4", cwd = "/a" }, {})[4], "id:4")
+
+  -- (e) a spawn waits for its OWN window: never a prefix sibling, never its parent
+  local SP = { editor = "vscode", ancestors = false }
+  eq("pickWindow: a spawn waiting for myapp does not accept myapp-fix-y",
+     core.coldStartStep(core.pickWindow({ "x — myapp-fix-y" }, "myapp", "/p/myapp", U, SP) ~= nil, 0, 25), "wait")
+  eq("pickWindow: a spawn of Dialer-info-Five9 never accepts the parent Dialer window",
+     core.pickWindow({ "x — Dialer" }, "Dialer-info-Five9", "/Users/adam/Programming/Dialer/Dialer-info-Five9", U, SP), nil)
+  eq("pickWindow: a jump (ancestors on) still reaches the parent's window",
+     core.pickWindow({ "x — Dialer" }, "Dialer-info-Five9", "/Users/adam/Programming/Dialer/Dialer-info-Five9", U), 1)
+
+  -- (f) Deck Voice routes dictation only to the front window's own session
+  local voice = { { key = "di", name = "Dialer-info", cwd = "/Users/adam/Programming/Dialer/Dialer-info" } }
+  eq("sessionForTitle: a prefix-named sibling is never routed dictation",
+     core.sessionForTitle(voice, "x — Dialer-info-Five9", U), nil)
+
+  -- Terminal.app puts the folder FIRST ("myapp — claude — 120×40")
+  local TM = { editor = "terminal" }
+  eq("pickWindow: a Terminal window is still found by its leading folder segment",
+     core.pickWindow({ "myapp — claude — 120×40" }, "myapp", "/p/myapp", U, TM), 1)
+  eq("pickWindow: a Terminal window titled with a path is judged on its last folder",
+     core.pickWindow({ "~/Programming/myapp — zsh — 80×24" }, "myapp", "/p/myapp", U, TM), 1)
+  eq("pickWindow: a Terminal window of a prefix sibling is never picked",
+     core.pickWindow({ "myapp-fix-y — zsh — 80×24" }, "myapp", "/p/myapp", U, TM), nil)
 end
 
 -- ---- Part C: modeCycleSteps ------------------------------------------------
