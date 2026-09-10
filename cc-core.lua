@@ -7626,8 +7626,29 @@ function M.worklistNormalize(t)
             if type(sk) == "string" and sv then seen[sk] = true end
           end
         end
+        -- one tab per project (2026-09-10): a repo tab records every worktree root it
+        -- reads + a modification time per root. Rebuilt into fresh tables like `seen`
+        -- (hs.json interns empty {}), junk entries dropped.
+        local roots, rootSeen = {}, {}
+        if type(v.roots) == "table" then
+          for _, r in ipairs(v.roots) do
+            if type(r) == "table" and type(r.root) == "string" and r.root ~= "" and not rootSeen[r.root] then
+              rootSeen[r.root] = true
+              roots[#roots + 1] = { root = r.root,
+                branch = (type(r.branch) == "string" and r.branch ~= "") and r.branch or nil,
+                isMain = (r.isMain == true) or nil }
+            end
+          end
+        end
+        local mtimes = {}
+        if type(v.mtimes) == "table" then
+          for mk, mv in pairs(v.mtimes) do
+            if type(mk) == "string" and tonumber(mv) then mtimes[mk] = tonumber(mv) end
+          end
+        end
         todoMeta[k] = { cwd = (type(v.cwd) == "string" and v.cwd ~= "") and v.cwd or nil,
-                        mtime = tonumber(v.mtime), seen = seen }
+                        mtime = tonumber(v.mtime), seen = seen,
+                        roots = (#roots > 0) and roots or nil, mtimes = next(mtimes) and mtimes or nil }
       end
     end
   end
@@ -7681,58 +7702,167 @@ end
 -- FX-owned I/O facts -- untouched here. Returns { added, updated, missing }
 -- counts for the panel's toast. Pure.
 function M.worklistImportTodos(state, projectKey, parsed, now, idgen)
+  -- A plain folder's one TODO.md: the multi-root import with a single main root, so
+  -- both paths share one set of rules (and one set of fixtures).
+  return M.worklistImportTodoRoots(state, projectKey,
+    { { root = "", isMain = true, parsed = type(parsed) == "table" and parsed or {} } }, now, idgen)
+end
+
+-- One tab per project (2026-09-10): merge EVERY worktree's TODO.md into the project's
+-- one list. sources = { {root, branch, isMain, parsed}, ... } -- only roots whose file
+-- was actually READ this pass, main first. The files are unioned by exact line text
+-- (first-seen order, so main's lines lead): an identical line imports once (a repo that
+-- commits TODO.md gives every worktree a full copy of main's), `done` is OR'd into the
+-- fileDone badge only (HARD RULE: never `done`/`doneTs`), and each item remembers the
+-- roots/branches it came from -- cleared once the line is in main's copy, so the branch
+-- chip disappears when a branch merges. An item is flagged fileMissing only when the
+-- line vanished from a root that was read THIS pass: a removed or unreadable worktree
+-- took its file with it, which isn't the line going away. Tombstones (meta.seen) cover
+-- every root, so an item the user cleared never resurrects from a worktree's copy.
+-- Returns { added, updated, missing }. Pure.
+function M.worklistImportTodoRoots(state, key, sources, now, idgen)
   local counts = { added = 0, updated = 0, missing = 0 }
   if type(state) ~= "table" then return counts end
-  if type(projectKey) ~= "string" or projectKey == "" or projectKey == "generic"
-     or projectKey == "master" then return counts end
-  parsed = type(parsed) == "table" and parsed or {}
+  if type(key) ~= "string" or key == "" or key == "generic" or key == "master" then return counts end
   if type(state.byProject) ~= "table" then state.byProject = {} end
-  if type(state.byProject[projectKey]) ~= "table" then state.byProject[projectKey] = {} end
+  if type(state.byProject[key]) ~= "table" then state.byProject[key] = {} end
   if type(state.todoMeta) ~= "table" then state.todoMeta = {} end
-  if type(state.todoMeta[projectKey]) ~= "table" then state.todoMeta[projectKey] = {} end
-  local meta = state.todoMeta[projectKey]
+  if type(state.todoMeta[key]) ~= "table" then state.todoMeta[key] = {} end
+  local meta = state.todoMeta[key]
   if type(meta.seen) ~= "table" then meta.seen = {} end
-  local list = state.byProject[projectKey]
-  local byText = {}
-  for _, e in ipairs(parsed) do
-    if type(e) == "table" and type(e.text) == "string" and e.text ~= "" then
-      byText[e.text] = { done = e.done == true, matched = false }
+  local list = state.byProject[key]
+  local union, order, read, mainRoot = {}, {}, {}, nil
+  for _, src in ipairs(sources or {}) do
+    if type(src) == "table" and type(src.parsed) == "table" then
+      local root = tostring(src.root or "")
+      read[root] = true
+      if src.isMain then mainRoot = root end
+      for _, e in ipairs(src.parsed) do
+        if type(e) == "table" and type(e.text) == "string" and e.text ~= "" then
+          local u = union[e.text]
+          if not u then
+            u = { done = false, roots = {}, rootSet = {}, branches = {}, branchSet = {}, inMain = false, matched = false }
+            union[e.text] = u
+            order[#order + 1] = e.text
+          end
+          u.done = u.done or e.done == true
+          if not u.rootSet[root] then u.rootSet[root] = true; u.roots[#u.roots + 1] = root end
+          if src.isMain then
+            u.inMain = true
+          elseif type(src.branch) == "string" and src.branch ~= "" and not u.branchSet[src.branch] then
+            u.branchSet[src.branch] = true
+            u.branches[#u.branches + 1] = src.branch
+          end
+        end
+      end
     end
   end
-  -- Pass 1: refresh fileDone/fileMissing on already-imported items.
+  local function tag(it, u)
+    if u.inMain then
+      it.srcRoots, it.srcBranches = nil, nil
+    else
+      it.srcRoots = u.roots
+      it.srcBranches = (#u.branches > 0) and u.branches or nil
+    end
+  end
+  -- Pass 1: refresh fileDone/fileMissing/source tags on already-imported items.
   for _, it in ipairs(list) do
     if type(it) == "table" and it.src == "todo" then
-      local key = (type(it.srcText) == "string" and it.srcText ~= "") and it.srcText or it.text
-      local e = byText[key]
-      if e then
-        local nfd = e.done and true or nil
+      local t = (type(it.srcText) == "string" and it.srcText ~= "") and it.srcText or it.text
+      local u = union[t]
+      if u then
+        local nfd = u.done and true or nil
         if it.fileDone ~= nfd or it.fileMissing then counts.updated = counts.updated + 1 end
         it.fileDone = nfd
         it.fileMissing = nil
-        e.matched = true
-        meta.seen[key] = true  -- self-heal a tombstone lost to an older file
+        tag(it, u)
+        u.matched = true
+        meta.seen[t] = true  -- self-heal a tombstone lost to an older file
       else
-        if not it.fileMissing then counts.updated = counts.updated + 1 end
-        it.fileMissing = true
-        counts.missing = counts.missing + 1
+        -- untagged items came from the main root (every pre-worktree import did too)
+        local from = (type(it.srcRoots) == "table" and #it.srcRoots > 0) and it.srcRoots or { mainRoot }
+        local wasRead = false
+        for _, r in ipairs(from) do if r ~= nil and read[r] then wasRead = true; break end end
+        if wasRead then
+          if not it.fileMissing then counts.updated = counts.updated + 1 end
+          it.fileMissing = true
+          counts.missing = counts.missing + 1
+        end
       end
     end
   end
-  -- Pass 2: append never-seen lines, in file order, as unverified items.
-  for _, e in ipairs(parsed) do
-    if type(e) == "table" and type(e.text) == "string" and e.text ~= "" then
-      local b = byText[e.text]
-      if b and not b.matched and not meta.seen[e.text] then
-        list[#list + 1] = { id = tostring(idgen and idgen() or ""), text = e.text, done = false,
-                            ts = tonumber(now) or 0, details = "", due = "", steps = {},
-                            src = "todo", srcText = e.text, fileDone = b.done and true or nil }
-        b.matched = true
-        meta.seen[e.text] = true
-        counts.added = counts.added + 1
-      end
+  -- Pass 2: append never-seen lines, main's first, in file order, as unverified items.
+  for _, t in ipairs(order) do
+    local u = union[t]
+    if not u.matched and not meta.seen[t] then
+      local it = { id = tostring(idgen and idgen() or ""), text = t, done = false,
+                   ts = tonumber(now) or 0, details = "", due = "", steps = {},
+                   src = "todo", srcText = t, fileDone = u.done and true or nil }
+      tag(it, u)
+      list[#list + 1] = it
+      u.matched = true
+      meta.seen[t] = true
+      counts.added = counts.added + 1
     end
   end
   return counts
+end
+
+-- Which My List tab a session's items belong to: a repo session -> the tab that
+-- recorded its main checkout's root (so an existing main-folder list keeps its items,
+-- however its key is spelled), else the main checkout's own project key. A plain
+-- folder, a remote tile or a bare repo keeps its own projectKey. rootKeys = { [root] =
+-- tabKey } from todoMeta. Pure.
+function M.worklistStackTabKey(it, rootKeys)
+  if type(it) ~= "table" then return nil end
+  if it.remote or type(it.mainRoot) ~= "string" or it.mainRoot == "" then return it.projectKey end
+  local k = type(rootKeys) == "table" and rootKeys[it.mainRoot] or nil
+  if type(k) == "string" and k ~= "" then return k end
+  return M.encodeProjectPath(it.mainRoot) or it.projectKey
+end
+
+-- The worktree roots a repo tab reads, main first: git's listing (its branch wins),
+-- live sessions' roots, and the roots recorded at earlier imports -- deduped. Once git
+-- has listed the repo (gitOk), a recorded root it no longer lists and no live session
+-- uses is dropped (a removed worktree); offline, recorded roots are kept. Bare and
+-- prunable entries are never read. Returns { {root, branch, isMain}, ... }. Pure.
+function M.worklistRootList(mainRoot, live, git, recorded, gitOk)
+  local out, byRoot = {}, {}
+  local main = (type(mainRoot) == "string" and mainRoot ~= "") and M.normDir(mainRoot) or nil
+  local function add(root, branch, isMain)
+    if type(root) ~= "string" or root == "" then return end
+    root = M.normDir(root)
+    local e = byRoot[root]
+    if not e then e = { root = root }; byRoot[root] = e; out[#out + 1] = e end
+    if isMain or root == main then e.isMain = true end
+    if type(branch) == "string" and branch ~= "" and not e.branch then e.branch = branch end
+  end
+  if main then add(main, nil, true) end
+  local listed = {}
+  for _, w in ipairs(git or {}) do
+    if type(w) == "table" and type(w.path) == "string" and not w.bare and not w.prunable then
+      listed[M.normDir(w.path)] = true
+      add(w.path, w.branch, false)
+    end
+  end
+  local liveSet = {}
+  for _, l in ipairs(live or {}) do
+    if type(l) == "table" and type(l.root) == "string" then
+      liveSet[M.normDir(l.root)] = true
+      add(l.root, l.branch, l.isMain)
+    end
+  end
+  for _, r in ipairs(recorded or {}) do
+    if type(r) == "table" and type(r.root) == "string" then
+      local nr = M.normDir(r.root)
+      if not gitOk or listed[nr] or liveSet[nr] or nr == main then add(r.root, r.branch, r.isMain) end
+    end
+  end
+  table.sort(out, function(a, b)
+    if (a.isMain and 1 or 0) ~= (b.isMain and 1 or 0) then return a.isMain == true end
+    return a.root < b.root
+  end)
+  return out
 end
 
 -- ---- User stories editor (spec/product/user-stories.md) -------------------

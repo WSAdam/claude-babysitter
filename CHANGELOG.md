@@ -4,6 +4,35 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — My List: one tab per project across worktrees
+
+### Added — a repo's worktrees share one My List tab, fed by every worktree's TODO.md
+
+With project cards, a repo's main checkout and its worktrees are one project on the grid — but
+My List still gave each worktree folder its own tab, and in a repo that **commits** TODO.md every
+worktree carries a full copy of main's list, so each worktree tab would have re-imported all of
+main's items as duplicates to verify.
+
+Now a repo's sessions all land in **one tab** (the main checkout's existing list keeps its items),
+and its import reads **every worktree's** `TODO.md` — main's first — as one union:
+
+- a line present in several copies imports **once**; any copy's `[x]` lights the **✓ auto**
+  badge (still never your checkmark);
+- a line that exists only on a branch carries a **⎇ branch** chip until it reaches main's copy;
+- a line is flagged missing only when it vanished from a worktree that still exists — a removed
+  worktree took its file with it, so its items simply stay;
+- tombstones cover every worktree, so an item you cleared never comes back from a worktree's copy.
+
+The tab records each root it reads (`todoMeta[key].roots` + per-root `mtimes`), so auto-sync
+watches every worktree's file and an offline tab re-reads its recorded roots; a worktree of an
+enrolled tab that gains a TODO.md is picked up on its own. Roots are always derived in Lua (live
+sessions, `git worktree list` on an explicit import, recorded roots) — never from the panel.
+
+*Tests:* the union rules are pure fixtures in `core.test.lua` (the old single-root import is now a
+one-root wrapper, so every earlier TODO.md fixture passes unchanged); `tests/worklist-worktrees.test.lua`
+loads the real dashboard with a stubbed `git` answering for a main checkout + a linked worktree and
+checks the pushed My List end to end; `worklist-ui.test.sh` pins the wiring.
+
 ## 2026-09-10 — Jumping to a session that entered a worktree lands on its window
 
 ### Fixed — a session moved by EnterWorktree could not be jumped to

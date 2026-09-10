@@ -965,6 +965,13 @@ again to go back; the fleet bulk buttons still appear only when there's somethin
   launch-folder identity** (same as relabels/groups). A project's tab and its items **persist
   whether or not a window is open** — an idle or closed project keeps its button (labeled from its
   saved relabel / auto-title) until you clear the list, so its to-dos never disappear on you.
+- **TODO.md import** — **⇪ Import TODO.md** pulls a project's `TODO.md` checkboxes into its tab as
+  verify-me items (the file's `[x]` shows as a **✓ auto** chip; the row checkbox stays yours), and
+  once imported the tab **re-syncs whenever the file changes**. **One tab per project across
+  worktrees:** a repo's main checkout and its linked worktrees share one tab, and its import reads
+  **every worktree's** `TODO.md` — a line present in several copies imports once, a line that exists
+  only on a branch carries a **⎇ branch** chip until it reaches main's copy, and a removed
+  worktree's items stay put (not flagged missing — the file simply left with the worktree).
 - **The item modal** — **＋ Add an item…** (or clicking any row) opens one editor with:
   - **Subject** — the one line the list shows. Enter saves.
   - **Details** — free-form notes/context, as long as you like.

@@ -204,6 +204,10 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want each scope's Done area ordered by due date, so that completed work reads in a predictable order.
 - As a **fleet operator**, I want every Done row to show both the date it was expected and the date I actually finished it, so that I can see whether I hit my own deadlines.
 - As a **fleet operator**, I want to paste text into any modal field (subject, details, a step), so that I can drop in context without it landing in the nudge box.
+- As a **fleet operator**, I want a repo's main checkout and its worktrees to share one My List tab that imports every worktree's TODO.md, so that I verify a project's work in one place however many branches are in flight.
+- As a **fleet operator**, I want a TODO line that appears in several worktrees' copies to import once, so that a repo that commits TODO.md doesn't hand me every item again per worktree.
+- As a **fleet operator**, I want a line that exists only on a branch to show that branch until it reaches main, so that I know which unit of work it belongs to.
+- As a **fleet operator**, I want a removed worktree's items to stay in My List instead of being flagged missing, so that finishing and removing a worktree never loses what I still have to verify.
 
 ## Keeping the Mac & fleet running
 

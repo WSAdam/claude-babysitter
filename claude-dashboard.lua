@@ -1488,35 +1488,119 @@ function FX.todoRoot(cwd)
   return FX.gitRoot(cwd) or cwd
 end
 
--- Rebuild the projectKey -> TODO.md path watch map from persisted todoMeta. The
--- in-memory mtime survives (the persisted one only seeds unknown keys), so a
--- Shepherd restart re-syncs once iff the file moved while it was down --
--- idempotent anyway thanks to the tombstones.
+-- Rebuild the tab -> TODO.md paths watch map from persisted todoMeta: one path for a
+-- plain folder (meta.cwd), one per worktree root for a repo tab (meta.roots). The
+-- in-memory mtimes (keyed by PATH) survive; the persisted ones only seed unknown
+-- paths, so a Shepherd restart re-syncs once iff a file moved while it was down --
+-- idempotent anyway thanks to the tombstones. Also rebuilds FX._todoRootKey (root ->
+-- the tab that recorded it), which routes a repo's sessions to their main checkout's
+-- existing tab (core.worklistStackTabKey).
 function FX.todoRebuildWatch(st)
   FX._todoMtime = FX._todoMtime or {}
-  local w = {}
+  local w, rk = {}, {}
+  local function claim(root, k)
+    if rk[root] == nil or k == core.encodeProjectPath(root) then rk[root] = k end
+  end
   for k, meta in pairs((st or {}).todoMeta or {}) do
-    if type(k) == "string" and type(meta) == "table"
-       and type(meta.cwd) == "string" and meta.cwd ~= "" then
-      w[k] = meta.cwd .. "/TODO.md"
-      if FX._todoMtime[k] == nil then FX._todoMtime[k] = tonumber(meta.mtime) end
+    if type(k) == "string" and type(meta) == "table" then
+      local paths = {}
+      if type(meta.roots) == "table" and #meta.roots > 0 then
+        for _, rt in ipairs(meta.roots) do
+          local p = rt.root .. "/TODO.md"
+          paths[#paths + 1] = p
+          if FX._todoMtime[p] == nil and type(meta.mtimes) == "table" then FX._todoMtime[p] = tonumber(meta.mtimes[rt.root]) end
+          claim(rt.root, k)
+        end
+      elseif type(meta.cwd) == "string" and meta.cwd ~= "" then
+        local p = meta.cwd .. "/TODO.md"
+        paths[1] = p
+        if FX._todoMtime[p] == nil then FX._todoMtime[p] = tonumber(meta.mtime) end
+        claim(meta.cwd, k)
+      end
+      if #paths > 0 then w[k] = paths end
     end
   end
   FX._todoWatch = w
+  FX._todoRootKey = rk
 end
 
--- Import a batch of projects' TODO.md files. entries = { {key, cwd?}, ... }; a
--- live cwd wins (and re-records a drifted root), else the recorded meta.cwd. One
--- worklist write for the whole batch. Returns aggregate counts for the toast.
--- The import never touches an item's done/doneTs (core enforces): the file's [x]
--- lands as the fileDone badge, and only the user's click verifies an item.
+-- One tab per project (2026-09-10): the My List tab a live session's TODO items land in.
+-- A repo's worktrees share the main checkout's tab; everything else keeps its own.
+function FX.worklistTabKey(it)
+  if type(it) ~= "table" then return nil end
+  return core.worklistStackTabKey(it, FX._todoRootKey or {})
+end
+
+-- The worktree roots a repo tab reads (main first), or nil for a plain-folder tab. Live
+-- sessions on the tab give their roots and the main checkout; opts.git adds the repo's
+-- `git worktree list` (explicit imports only, never on the tick); roots recorded at
+-- earlier imports fill in offline. Paths NEVER come from the webview.
+function FX.stackRootsFor(tabKey, st, opts)
+  opts = opts or {}
+  st = st or FX.readWorklist()
+  local meta = (st.todoMeta or {})[tabKey]
+  local recorded = type(meta) == "table" and type(meta.roots) == "table" and meta.roots or nil
+  local live, mainRoot, repoKey = {}, nil, nil
+  for _, it in ipairs(lastRenderList or {}) do
+    if not it.remote and it.wtRoot and it.mainRoot and FX.worklistTabKey(it) == tabKey then
+      live[#live + 1] = { root = it.wtRoot, branch = it.branch, isMain = it.isMainWt }
+      mainRoot = mainRoot or it.mainRoot
+      repoKey = repoKey or it.repoKey
+    end
+  end
+  if not mainRoot and recorded then
+    for _, rt in ipairs(recorded) do if rt.isMain then mainRoot = rt.root end end
+  end
+  if not mainRoot and not recorded then return nil end
+  local git, gitOk = {}, false
+  if opts.git and repoKey then
+    local wts, err = FX.repoWorktrees(repoKey)
+    git, gitOk = wts, (err == nil)
+  end
+  return core.worklistRootList(mainRoot, live, git, recorded or {}, gitOk)
+end
+
+-- Import a batch of projects' TODO.md files. entries = { {key, cwd?} | {key, roots} }:
+-- a plain folder reads one TODO.md (a live cwd wins and re-records a drifted root,
+-- else the recorded meta.cwd); a repo tab (roots) reads every worktree root's file and
+-- unions them (core.worklistImportTodoRoots). One worklist write for the whole batch.
+-- Returns aggregate counts for the toast. The import never touches an item's
+-- done/doneTs (core enforces): the file's [x] lands as the fileDone badge, and only
+-- the user's click verifies an item.
 function FX.todoImportProjects(entries, stArg)
   local st = stArg or FX.readWorklist()
   local r = { projects = 0, added = 0, updated = 0, missing = 0, skipped = 0 }
   FX._todoMtime = FX._todoMtime or {}
   for _, e in ipairs(entries or {}) do
     local key = type(e) == "table" and e.key or nil
-    if type(key) == "string" and key ~= "" then
+    if type(key) == "string" and key ~= "" and type(e.roots) == "table" and #e.roots > 0 then
+      local sources, mainRoot = {}, nil
+      for _, rt in ipairs(e.roots) do
+        if rt.isMain then mainRoot = rt.root end
+        local content = FX.readFile(rt.root .. "/TODO.md")
+        if content then
+          sources[#sources + 1] = { root = rt.root, branch = rt.branch, isMain = rt.isMain,
+                                    parsed = core.parseTodoFile(content) }
+        end
+      end
+      if #sources == 0 then
+        r.skipped = r.skipped + 1
+      else
+        local c = core.worklistImportTodoRoots(st, key, sources, FX.now(), FX.worklistNewId)
+        local meta = st.todoMeta[key]            -- core guaranteed the container
+        meta.roots, meta.mtimes = {}, {}
+        for _, rt in ipairs(e.roots) do
+          meta.roots[#meta.roots + 1] = { root = rt.root, branch = rt.branch, isMain = rt.isMain or nil }
+          local p = rt.root .. "/TODO.md"
+          local m = tonumber(hs.fs.attributes(p, "modification"))
+          if m then meta.mtimes[rt.root] = m; FX._todoMtime[p] = m end
+        end
+        meta.cwd = mainRoot or meta.cwd          -- older builds read these two
+        meta.mtime = (mainRoot and meta.mtimes[mainRoot]) or meta.mtime
+        r.projects = r.projects + 1
+        r.added, r.updated, r.missing = r.added + c.added, r.updated + c.updated, r.missing + c.missing
+      end
+    elseif type(key) == "string" and key ~= "" then
       local meta = (st.todoMeta or {})[key]
       local root = FX.todoRoot(e.cwd) or (type(meta) == "table" and meta.cwd or nil)
       local content = root and FX.readFile(root .. "/TODO.md") or nil
@@ -1528,7 +1612,7 @@ function FX.todoImportProjects(entries, stArg)
         meta = st.todoMeta[key]                  -- core guaranteed the container
         meta.cwd = root
         meta.mtime = tonumber(hs.fs.attributes(root .. "/TODO.md", "modification")) or meta.mtime
-        FX._todoMtime[key] = meta.mtime
+        FX._todoMtime[root .. "/TODO.md"] = meta.mtime
         r.projects = r.projects + 1
         r.added, r.updated, r.missing = r.added + c.added, r.updated + c.updated, r.missing + c.missing
       end
@@ -1541,50 +1625,75 @@ function FX.todoImportProjects(entries, stArg)
   return r
 end
 
--- The global "All projects" sweep: every live local tile + every enrolled
--- offline project (its root was recorded at import time). A never-imported
--- project with no live session has no discoverable root -- skipped by design.
+-- The global "All projects" sweep: one entry per live TAB (a repo's worktrees are one
+-- tab, read through all their roots) + every enrolled offline tab (its roots / root
+-- were recorded at import time). A never-imported project with no live session has
+-- no discoverable root -- skipped by design.
 function FX.todoImportAll()
   local st = FX.readWorklist()
   local entries, seenK = {}, {}
   for _, it in ipairs(lastRenderList or {}) do
-    local k = it.projectKey
+    local k = FX.worklistTabKey(it)
     if type(k) == "string" and k ~= "" and not seenK[k]
        and it.cwd and it.cwd ~= "" and not it.remote then
       seenK[k] = true
-      entries[#entries + 1] = { key = k, cwd = it.cwd }
+      local roots = FX.stackRootsFor(k, st, { git = true })
+      entries[#entries + 1] = roots and { key = k, roots = roots } or { key = k, cwd = it.cwd }
     end
   end
   for k, meta in pairs(st.todoMeta or {}) do
-    if type(k) == "string" and k ~= "" and not seenK[k] and type(meta) == "table" and meta.cwd then
+    if type(k) == "string" and k ~= "" and not seenK[k] and type(meta) == "table" and (meta.cwd or meta.roots) then
       seenK[k] = true
-      entries[#entries + 1] = { key = k }
+      entries[#entries + 1] = (type(meta.roots) == "table" and #meta.roots > 0)
+        and { key = k, roots = meta.roots } or { key = k }
     end
   end
   return FX.todoImportProjects(entries, st)
 end
 
--- 1 Hz auto-sync sweep (runs on the refresh tick): stat each enrolled project's
--- TODO.md and re-import the changed ones. The 2s settle guard skips a file whose
+-- 1 Hz auto-sync sweep (runs on the refresh tick): stat each enrolled tab's TODO.md
+-- file(s) and re-import the changed tabs. The 2s settle guard skips a file whose
 -- mtime is younger than 2s -- an automation may be mid-write, and the still-newer
 -- mtime retries it next tick. A vanished file is silently skipped (sync resumes
--- if it returns). First call lazy-seeds the watch map with one worklist read; an
--- un-enrolled install stays a pure pairs{} no-op forever after.
+-- if it returns). A live worktree of an enrolled repo tab that has a TODO.md but
+-- isn't watched yet (a new worktree) queues one import, which records its root.
+-- First call lazy-seeds the watch map with one worklist read; an un-enrolled
+-- install stays a pure pairs{} no-op forever after.
 function FX.todoAutoSyncTick(list)
   if FX._todoWatch == nil then FX.todoRebuildWatch(FX.readWorklist()) end
   local queued = nil
   local now = FX.now()
-  local liveCwd = {}
+  local liveCwd, liveRoots = {}, {}
   for _, it in ipairs(list or {}) do
-    if it.projectKey and it.cwd and it.cwd ~= "" and not it.remote then
-      liveCwd[it.projectKey] = it.cwd
+    if it.cwd and it.cwd ~= "" and not it.remote then
+      local k = FX.worklistTabKey(it)
+      if k then
+        liveCwd[k] = liveCwd[k] or it.cwd
+        if it.wtRoot and it.mainRoot then
+          liveRoots[k] = liveRoots[k] or {}
+          liveRoots[k][it.wtRoot] = true
+        end
+      end
     end
   end
-  for key, path in pairs(FX._todoWatch) do
-    local m = tonumber(hs.fs.attributes(path, "modification"))
-    if m and m ~= FX._todoMtime[key] and (now - m) >= 2 then
+  for key, paths in pairs(FX._todoWatch) do
+    local due = false
+    for _, path in ipairs(paths) do
+      local m = tonumber(hs.fs.attributes(path, "modification"))
+      if m and m ~= FX._todoMtime[path] and (now - m) >= 2 then due = true end
+    end
+    if not due and liveRoots[key] then
+      local watched = {}
+      for _, p in ipairs(paths) do watched[p] = true end
+      for root in pairs(liveRoots[key]) do
+        local p = root .. "/TODO.md"
+        if not watched[p] and FX.fileExists(p) then due = true end
+      end
+    end
+    if due then
       queued = queued or {}
-      queued[#queued + 1] = { key = key, cwd = liveCwd[key] }
+      local roots = FX.stackRootsFor(key, nil, {})   -- nil for a plain-folder tab
+      queued[#queued + 1] = roots and { key = key, roots = roots } or { key = key, cwd = liveCwd[key] }
     end
   end
   if not queued then return end
@@ -3869,21 +3978,32 @@ function FX.worklistPayload()
   local tmeta = st.todoMeta or {}
   local seen, projects = {}, {}
   for _, it in ipairs(lastRenderList or {}) do
-    local k = it.projectKey
+    -- one tab per project (2026-09-10): a repo's worktrees share the main checkout's tab
+    local k = FX.worklistTabKey(it)
     if k and k ~= "" and not seen[k] then
       seen[k] = true
       -- TODO.md button gating: hasTodo = a file exists at the project's root
-      -- (live root, else the enrolled one); todoOn = already enrolled in sync.
+      -- (live root, else the enrolled one; any worktree root for a repo tab);
+      -- todoOn = already enrolled in sync.
       local tm = tmeta[k]
-      local root = (not it.remote) and FX.todoRoot(it.cwd) or nil
-      if not root and type(tm) == "table" then root = tm.cwd end
+      local hasTodo
+      local roots = (it.mainRoot and not it.remote) and FX.stackRootsFor(k, st, {}) or nil
+      if roots then
+        for _, rt in ipairs(roots) do
+          if FX.fileExists(rt.root .. "/TODO.md") then hasTodo = true; break end
+        end
+      else
+        local root = (not it.remote) and FX.todoRoot(it.cwd) or nil
+        if not root and type(tm) == "table" then root = tm.cwd end
+        hasTodo = (root and FX.fileExists(root .. "/TODO.md")) or nil
+      end
       projects[#projects + 1] = {
         key = k,
-        label = (it.label and it.label ~= "" and it.label) or it.name
+        label = (it.repoKey and it.stackName) or (it.label and it.label ~= "" and it.label) or it.name
                 or labels[k] or autos[k] or core.projectKeyLabel(k),
         items = core.worklistScopeList(st, k),
         todoOn = (tm ~= nil) or nil,
-        hasTodo = (root and FX.fileExists(root .. "/TODO.md")) or nil,
+        hasTodo = hasTodo or nil,
       }
     end
   end
@@ -5236,11 +5356,17 @@ local function handleBridgeMsg(msg)
     if a == "todo-import" then
       local scope = tostring(payload.v or "")
       if scope == "" or scope == "generic" or scope == "master" then return end
-      local cwd = nil
-      for _, it in ipairs(lastRenderList or {}) do
-        if it.projectKey == scope and it.cwd and it.cwd ~= "" and not it.remote then cwd = it.cwd; break end
+      -- a repo tab reads every worktree root (derived here, never from the payload)
+      local roots = FX.stackRootsFor(scope, nil, { git = true })
+      if roots then
+        r = FX.todoImportProjects({ { key = scope, roots = roots } })
+      else
+        local cwd = nil
+        for _, it in ipairs(lastRenderList or {}) do
+          if FX.worklistTabKey(it) == scope and it.cwd and it.cwd ~= "" and not it.remote then cwd = it.cwd; break end
+        end
+        r = FX.todoImportProjects({ { key = scope, cwd = cwd } })
       end
-      r = FX.todoImportProjects({ { key = scope, cwd = cwd } })
     else
       r = FX.todoImportAll()
     end
@@ -6797,6 +6923,10 @@ local HTML = [[
     border:1px solid #2c5a3a; border-radius:8px; padding:0 5px; white-space:nowrap; }
   .wl-fdone.need { color:var(--warn); border-color:#5a4a22; }
   .wl-fmiss { flex:0 0 auto; font-size:clamp(9px,2.5cqw,11px); color:var(--muted); }
+  /* one tab per project: the branch a TODO line came from, until it reaches main */
+  .wl-br { flex:0 0 auto; font-size:clamp(9px,2.5cqw,11px); color:var(--text-3); background:var(--surface-2);
+    border:1px solid var(--border-weak); border-radius:8px; padding:0 5px; white-space:nowrap;
+    max-width:10em; overflow:hidden; text-overflow:ellipsis; }
   /* MASTER: the cross-scope rollup tab, set apart from the real scopes. */
   .wl-master { font-weight:700; letter-spacing:.06em; font-size:clamp(9px,2.7cqw,11px); color:var(--purple); border-color:#3d3560; }
   .wl-master.on { background:#241f38; border-color:var(--purple); color:var(--purple); }
@@ -9172,8 +9302,17 @@ local HTML = [[
     // TODO.md badges: the automation's [x] claim ("✓ auto") + a vanished-line ⚠.
     // A chip on purpose -- NEVER the row checkbox, which stays the user's
     // verification alone. Amber (need) until the user ticks the box themselves.
+    // One tab per project (2026-09-10): which worktree branch(es) a TODO line came from
+    // -- shown until the line reaches main's TODO.md (Lua clears srcBranches then).
+    function wlBranchChip(it){
+      var b = (it && Array.isArray(it.srcBranches)) ? it.srcBranches : [];
+      if(!b.length) return "";
+      var first = String(b[0]);
+      return '<span class="wl-br" title="' + esc("From TODO.md on " + b.join(", ")) + '">⎇ ' + esc(first)
+           + (b.length > 1 ? " +" + (b.length - 1) : "") + '</span>';
+    }
     function wlFileBadges(it, isDone){
-      var h = "";
+      var h = wlBranchChip(it);
       if(it && it.fileDone) h += '<span class="wl-fdone' + (isDone ? "" : " need")
         + '" title="Automation marked this done in TODO.md — tick the box once YOU have verified it">✓ auto</span>';
       if(it && it.fileMissing) h += '<span class="wl-fmiss" title="This line is no longer in TODO.md">⚠</span>';

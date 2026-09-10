@@ -8405,5 +8405,91 @@ do
   eq("seen: a jump that found no window marks nothing", seen[2], nil)
 end
 
+-- ---- My List: one tab per project (2026-09-10) ------------------------------
+-- A repo's main checkout and its worktrees share ONE My List tab, fed by every worktree's
+-- TODO.md. Repos that COMMIT TODO.md give each worktree a full copy of main's list, so an
+-- identical line imports once; a line only on a branch is tagged with that branch until
+-- it reaches main; a removed worktree's items stay (they're not "missing" -- the file is
+-- just gone with the worktree). HARD RULE unchanged: a file's [x] never sets `done`.
+do
+  local function st() return core.worklistNormalize({}) end
+  local idn = 0
+  local function idg() idn = idn + 1; return "id" .. idn end
+  local P = core.parseTodoFile
+  local main = { root = "/r/main", isMain = true, parsed = P("- [ ] shared one\n- [ ] shared two\n") }
+  local fix  = { root = "/r/main-fix", branch = "fix/y", parsed = P("- [ ] shared one\n- [ ] shared two\n- [x] fix only\n") }
+  local s = st()
+  local c = core.worklistImportTodoRoots and core.worklistImportTodoRoots(s, "K", { main, fix }, 100, idg) or {}
+  local L = (s.byProject or {}).K or {}
+  eq("roots: identical lines across worktrees import once", #L, 3)
+  eq("roots: main's lines come first, in file order", (L[1] or {}).text, "shared one")
+  eq("roots: a line only on a branch is tagged with that branch", table.concat((L[3] or {}).srcBranches or {}, ","), "fix/y")
+  eq("roots: a line in main is untagged even when every worktree has it", (L[1] or {}).srcBranches, nil)
+  eq("roots: any worktree's [x] marks it done by automation", (L[3] or {}).fileDone, true)
+  eq("roots: HARD RULE -- a worktree's [x] never sets the user's checkmark", (L[3] or {}).done, false)
+  eq("roots: counts the additions", c.added, 3)
+
+  local c2 = core.worklistImportTodoRoots and core.worklistImportTodoRoots(s, "K", { main }, 200, idg) or {}
+  eq("roots: removing a worktree never flags its lines missing", (L[3] or {}).fileMissing, nil)
+  eq("roots: ...and flags nothing at all", c2.missing, 0)
+
+  local s3 = st()
+  if core.worklistImportTodoRoots then
+    core.worklistImportTodoRoots(s3, "K", { main, fix }, 100, idg)
+    core.worklistImportTodoRoots(s3, "K", { main, { root = "/r/main-fix", branch = "fix/y",
+      parsed = P("- [ ] shared one\n- [ ] shared two\n") } }, 200, idg)
+  end
+  local L3 = (s3.byProject or {}).K or {}
+  eq("roots: a line deleted from a worktree that's still there is flagged missing", (L3[3] or {}).fileMissing, true)
+  if core.worklistImportTodoRoots then
+    core.worklistImportTodoRoots(s3, "K", { { root = "/r/main", isMain = true,
+      parsed = P("- [ ] shared one\n- [ ] shared two\n- [x] fix only\n") } }, 300, idg)
+  end
+  eq("roots: a branch line that lands on main loses its tag", (L3[3] or {}).srcBranches, nil)
+  eq("roots: ...and isn't missing any more", (L3[3] or {}).fileMissing, nil)
+
+  local s4 = st()
+  local texts = {}
+  if core.worklistImportTodoRoots then
+    core.worklistImportTodoRoots(s4, "K", { main }, 100, idg)
+    table.remove(s4.byProject.K, 1)   -- the user cleared "shared one" after verifying it
+    core.worklistImportTodoRoots(s4, "K", { main, fix }, 200, idg)
+    for _, it in ipairs(s4.byProject.K) do texts[#texts + 1] = it.text end
+  end
+  eq("roots: a cleared item never comes back from a worktree's copy", table.concat(texts, "|"), "shared two|fix only")
+
+  local s5 = st()
+  core.worklistImportTodos(s5, "P", P("- [ ] a\n"), 1, idg)
+  eq("roots: a plain folder's single-root import carries no branch fields", s5.byProject.P[1].srcBranches, nil)
+
+  local n = core.worklistNormalize({ todoMeta = { K = { cwd = "/r/main", mtime = 5, seen = {},
+    roots = { { root = "/r/main", isMain = true }, { root = "/r/main-fix", branch = "fix/y" }, "junk" },
+    mtimes = { ["/r/main"] = 5, ["/r/main-fix"] = 7, bad = "x" } } } })
+  eq("normalize: recorded worktree roots survive a reload", #(n.todoMeta.K.roots or {}), 2)
+  eq("normalize: ...with their branch", ((n.todoMeta.K.roots or {})[2] or {}).branch, "fix/y")
+  eq("normalize: per-root mtimes survive", (n.todoMeta.K.mtimes or {})["/r/main-fix"], 7)
+  eq("normalize: junk mtimes are dropped", (n.todoMeta.K.mtimes or {}).bad, nil)
+
+  local tabKey = core.worklistStackTabKey or function() return nil end
+  local rootKeys = { ["/r/main"] = "-r-main-legacy" }
+  eq("tab: a plain folder keeps its own tab", tabKey({ projectKey = "-n" }, rootKeys), "-n")
+  eq("tab: a worktree session lands on the tab that recorded its main checkout",
+     tabKey({ projectKey = "-r-main-fix", mainRoot = "/r/main", repoKey = "/r/main/.git" }, rootKeys), "-r-main-legacy")
+  eq("tab: with no record, the tab is the main checkout's own key",
+     tabKey({ projectKey = "-r-other-fix", mainRoot = "/r/other", repoKey = "/r/other/.git" }, {}), "-r-other")
+  eq("tab: a remote tile keeps its own", tabKey({ projectKey = "-x", mainRoot = "/r/main", remote = { host = "b" } }, rootKeys), "-x")
+
+  local rootList = core.worklistRootList or function() return {} end
+  local roots = rootList("/r/main",
+    { { root = "/r/main-fix", branch = "fix/y" } },
+    { { path = "/r/main", branch = "main" }, { path = "/r/main-fix", branch = "fix/y" }, { path = "/r/bare.git", bare = true } },
+    { { root = "/r/old-removed" }, { root = "/r/main-fix" } }, true)
+  local rs = {} for _, x in ipairs(roots) do rs[#rs + 1] = x.root .. (x.isMain and "*" or "") end
+  eq("rootList: main first, dupes collapsed, bare skipped, removed worktrees dropped once git has listed the repo",
+     table.concat(rs, ","), "/r/main*,/r/main-fix")
+  eq("rootList: offline (git not listed), recorded roots are kept",
+     #rootList("/r/main", {}, {}, { { root = "/r/main", isMain = true }, { root = "/r/old" } }, false), 2)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

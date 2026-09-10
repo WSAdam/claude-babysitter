@@ -126,6 +126,24 @@ assert_eq "tick calls the auto-sync sweep"       "yes" "$(has 'FX.todoAutoSyncTi
 assert_eq "sync stats the file mtime"            "yes" "$(has 'hs.fs.attributes(path, "modification")')"
 assert_eq "payload gates the button on hasTodo/todoOn" "yes" "$(has 'curProj.hasTodo || curProj.todoOn')"
 
+# ---- Feature 6: one tab per project (2026-09-10) ------------------------------------
+# A repo's main checkout and its worktrees share ONE tab fed by every worktree's TODO.md
+# (behaviour: tests/worklist-worktrees.test.lua + the core.test.lua "My List: one tab per
+# project" fixtures). These pin the wiring the behavioural test can't see.
+assert_eq "the payload keys tabs by project, not folder" "yes" "$(has 'local k = FX.worklistTabKey(it)')"
+assert_eq "a repo tab imports every worktree root through core" "yes" "$(has 'core.worklistImportTodoRoots(st, key, sources, FX.now(), FX.worklistNewId)')"
+assert_eq "the Import button derives a repo tab's roots in Lua" "yes" "$(has 'local roots = FX.stackRootsFor(scope, nil, { git = true })')"
+assert_eq "an offline repo tab re-reads its recorded roots" "yes" "$(has 'and { key = k, roots = meta.roots } or { key = k }')"
+assert_eq "auto-sync watches every root of a repo tab"     "yes" "$(has 'for _, path in ipairs(paths) do')"
+assert_eq "a line's branch shows as a chip beside the badges" "yes" "$(has 'var h = wlBranchChip(it);')"
+assert_eq "the branch chip is escaped"                   "yes" "$(has "'\">⎇ ' + esc(first)")"
+# roots are NEVER taken from the webview: the import branch never reads payload.text
+todo_block="$(awk '/if a == "todo-import" or a == "todo-import-all" then/,/^  end$/' "$DASH")"
+assert_eq "the handler block was extracted (no vacuous pass below)" "yes" \
+  "$(printf '%s' "$todo_block" | grep -qF 'FX.stackRootsFor(scope' && echo yes || echo no)"
+assert_eq "the import handler never trusts a path from the panel" "no" \
+  "$(printf '%s' "$todo_block" | grep -qF 'payload.text' && echo yes || echo no)"
+
 # ---- Feature 5: the Done drawer is ordered by WHEN IT WAS TICKED --------------------
 # 2026-09-02: the drawer sorted by DUE DATE, so items verified on different days came
 # back in arbitrary order -- and every TODO-imported item has no due date, so all of
