@@ -4,6 +4,23 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — My List auto-sync keeps a renamed project's tab name
+
+### Fixed — auto-sync reverting relabelled tabs to folder names
+
+Whenever an enrolled project's `TODO.md` changed while My List was open, the auto-sync push
+renamed that project's tab (and every other live tab) back to its folder name until the next
+full refresh of the list. The sweep ran — and pushed the My List payload — right after the
+tick's session list was built, *before* relabels were applied, and a tab's label reads the
+session's relabel first and its folder name second.
+
+Auto-sync now runs after relabels, auto-titles and chat titles are applied (still on every
+tick, panel shown or hidden). `tests/worklist-autosync.test.lua` loads the real dashboard with
+a relabelled, enrolled project whose `TODO.md` just changed and checks the pushed tab name —
+red before the move, green after. The old source pin that fixed the call "right after
+`lastRenderList` is set" pinned the bug's position and was rewritten as a dated requirement
+change.
+
 ## 2026-09-10 — Double-click (and select) land even while the grid re-renders
 
 ### Fixed — tile presses dropped by a grid rebuild mid-press

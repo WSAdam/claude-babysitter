@@ -2110,9 +2110,17 @@ do
   check("wl-todo: per-project button gated on hasTodo/todoOn with a sync label flip",
         src:find("curProj.hasTodo || curProj.todoOn", 1, true) ~= nil
         and src:find('"↻ Sync TODO.md" : "⇪ Import TODO.md"', 1, true) ~= nil)
-  check("wl-todo: auto-sync runs on the tick right after lastRenderList is set",
-        src:find("lastRenderList = list\n  -- TODO.md auto-sync", 1, true) ~= nil
-        and src:find("FX.todoAutoSyncTick(list)", 1, true) ~= nil)
+  -- REQUIREMENT CHANGE 2026-09-10: this pin fixed auto-sync "right after lastRenderList
+  -- is set" -- the position that WAS the bug (its push labelled tabs before relabels
+  -- were applied; behaviour: tests/worklist-autosync.test.lua). It now runs after the
+  -- relabels and before the hidden split, still on every tick (panel shown or hidden).
+  do
+    local iLabels = src:find("core.applyLabelsByCwd(list, labels)", 1, true)
+    local iSync   = src:find("  FX.todoAutoSyncTick(list)\n", 1, true)
+    local iHidden = src:find("local hiddenMap = FX.loadHidden()", 1, true)
+    check("wl-todo: auto-sync runs after the tick's relabels and before the hidden split",
+          iLabels and iSync and iHidden and iLabels < iSync and iSync < iHidden or false)
+  end
   check("wl-todo: HARD RULE -- the checkbox is never driven by fileDone",
         src:find('fileDone ? " checked"', 1, true) == nil)
   -- 2026-09-02: the Done drawer sorted by due date, so items ticked on different

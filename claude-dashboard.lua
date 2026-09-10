@@ -14669,10 +14669,6 @@ function FX._refreshBody()
   core.sortByStatus(list)
   -- Hand the fully-annotated list to the jump hotkey (it.hung / error status / sorted).
   lastRenderList = list
-  -- TODO.md auto-sync: enrolled projects (todoMeta) re-import when the file's
-  -- mtime moves. One stat per enrolled project per tick; runs panel-hidden too,
-  -- so the store keeps up even when the worklist isn't open.
-  FX.todoAutoSyncTick(list)
 
   -- 🔔 unseen-notification badge. The snapshot scan is the same cheap attributes
   -- pass risk scoring pays; the filter only reruns when the snapshot actually
@@ -14828,6 +14824,14 @@ function FX._refreshBody()
   -- and goes on managing it. Hiding is a display decision, nothing more.
   -- The stale sweep drops marks whose session has ended, so the file cannot grow
   -- without bound; it costs one table walk per tick.
+  -- TODO.md auto-sync: enrolled projects (todoMeta) re-import when the file's
+  -- mtime moves. One stat per enrolled project per tick; runs panel-hidden too,
+  -- so the store keeps up even when the worklist isn't open. It pushes the My List
+  -- payload, which labels each tab from the tick's list -- so it runs only AFTER
+  -- relabels, auto-titles and chat titles are applied. (2026-09-10: it used to run
+  -- right after lastRenderList was set, and every auto-sync renamed a relabelled
+  -- project's tab back to its folder name.)
+  FX.todoAutoSyncTick(list)
   local hiddenMap = FX.loadHidden()
   local shownList, hiddenList = list, {}
   if next(hiddenMap) ~= nil then
