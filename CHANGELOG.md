@@ -4,6 +4,43 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — One card per project: worktrees fold together, double-click finds who needs you
+
+### Added — project cards, the Instances view (`stacks.enabled`, on by default)
+
+For the parallel-worktree workflow — one unit of work = one branch = one sibling worktree
+folder = one VS Code window = one Claude session — a repo with three worktrees used to show
+as three unrelated tiles. Now a repo's main checkout and its linked worktrees (and two
+sessions in one folder) fold into **one card**:
+
+- **Identity from git, never names.** A session joins a repo's card only when its *launch
+  folder* is a worktree top-level (`git rev-parse --show-toplevel --git-common-dir`, cached per
+  launch folder; the launch folder comes from the transcript's project key, so a `cd` never
+  moves a session between cards). `canna-fresh` joins `Canna-better`; a scratch folder nested
+  inside a repo keeps its own card; A/B variants keep theirs.
+- **The card shows the instance that most needs you** — approval/question, then error, then
+  stalled (longest-waiting first), then a finished one you haven't jumped to (newest first),
+  else the most recently active, with a 30s hold so two busy instances don't swap the card on
+  every hook event. Branch chip and an "also: …" line summarise the rest.
+- **Double-click** jumps to that instance (`focus-group`, picked from fresh state among the
+  card's visible members). A jump that lands marks the instance seen — persisted, and seeded
+  on first run so yesterday's finished sessions don't all light up.
+- **The corner button** on every card opens the **Instances view**: each instance's folder,
+  branch, status, age and pending ask with Focus / Details, hidden instances with Unhide, and
+  the repo's worktrees with no session with **Open** — which only ever spawns into a worktree
+  the repo itself lists (a crafted path is refused).
+- Selection stays on the session (the card gets a dashed outline if it draws another), relabel
+  on a card names the repo, search matches branches and chat titles, bulk actions still act
+  only on matched sessions, the lock screen draws one ring per repo, and the Stream Deck stays
+  per-session. Right-click → **Instances…** is the reliable native path.
+
+*Tests:* identity, ranking, worktree parsing, the open verdict and the payload are pure and
+fixture-tested in `core.test.lua` (using real `rev-parse` / `worktree list` output shapes);
+`tests/stack-fold.test.js` runs the shipped fold, search and card extras; the press tests now
+cover stack pairing; `escaping.test.sh` covers the new user-controlled fields. Requirement
+changes, called out: chat titles are now per card (two ui pins), and the new-features count
+went 7 → 8.
+
 ## 2026-09-10 — My List auto-sync keeps a renamed project's tab name
 
 ### Fixed — auto-sync reverting relabelled tabs to folder names

@@ -134,6 +134,11 @@
     "useGitRoot": false
   },
 
+  "stacks": {
+    "_comment": "Project cards (ON by default). A repo's main checkout and its linked worktrees (e.g. ../repo-fix-y), or 2+ sessions in one folder, fold into ONE card that shows -- and double-click jumps to -- the instance that most needs you (blocked longest, then the newest finished one you haven't jumped to, else the most recently active). The card's corner button opens the Instances view: every instance plus the repo's worktrees with no session (Open). Identity comes from git (one cached `git rev-parse` per launch folder); a nested folder that isn't its own repo keeps its own card. false = one card per session, as before.",
+    "enabled": true
+  },
+
   "drain": {
     "_comment": "Graceful drain (Feature F). OFF by default. Adds a right-click 'Drain (finish turn, then close)' action: instead of closing immediately, it waits for the session to finish the in-flight turn (next done) and then closes. If the session is already idle/done it closes now. Drain wins over queue auto-feed for the same session.",
     "enabled": false

@@ -17,8 +17,8 @@ editors, the routine board) are intentionally omitted until they ship.
 
 ## Fleet overview & status
 
-- As a **fleet operator**, I want one always-on-top tile per Claude Code session showing its project and a live color-coded status, so that I can see the whole fleet at a glance without hunting through windows.
-- As a **fleet operator**, I want each session keyed by its session_id, so that two sessions in the same folder never collapse into one tile.
+- As a **fleet operator**, I want one always-on-top card per project — a repo's main checkout and its worktrees, or one folder — showing the instance that most needs me and a live color-coded status, so that I can see the whole fleet at a glance without hunting through windows.
+- As a **fleet operator**, I want each session keyed by its session_id, so that two sessions in the same folder stay two distinct instances — each listed in its card's Instances view — even while they share one card.
 - As a **fleet operator**, I want a tile to pulse red when its session needs permission or input, so that I can tell instantly which agent is blocked on me right now.
 - As a **fleet operator**, I want a tile to turn green when its turn finishes, so that I know which sessions are ready for my next instruction.
 - As a **fleet operator**, I want stale tiles to dim after ~90s of silence and disappear on SessionEnd, so that the grid reflects what's actually alive after a crash or clean exit.
@@ -26,6 +26,18 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want each tile to show time-in-state, the latest prompt, and the exact command being requested on an approval, so that I can triage what a session needs before opening it.
 - As a **fleet operator**, I want a live "Doing:" activity peek from the selected session's transcript, so that I can see what an agent is currently working on without switching to it.
 - As a **fleet operator**, I want duplicate "ghost" tiles left by /clear or restart auto-pruned by matching them to the same window, so that the grid stays clean without manual cleanup.
+
+## Projects & worktrees
+
+- As a **fleet operator**, I want a repo's main checkout and its sibling worktrees to share one project card, so that parallel units of work on one project read as one project instead of unrelated tiles.
+- As a **fleet operator**, I want a project card to show whichever instance most needs me, with its branch and a one-line summary of the others, so that I can triage a whole project from one card.
+- As a **fleet operator**, I want a button in the top-right of every card that opens the project's Instances view, so that I can see every instance's status, branch and pending ask in one list and focus any of them.
+- As a **fleet operator**, I want double-clicking a project card to jump to the instance that needs me most — the one blocked longest, then the newest finished one I haven't looked at, else the one most recently active — so that one gesture always lands where I'm needed.
+- As a **fleet operator**, I want a finished instance to stop outranking the others once I've jumped to it, until it finishes again, so that double-click doesn't keep sending me back to results I've already read.
+- As a **fleet operator**, I want the Instances view to list the repo's worktrees that have no session and open one in its editor with Claude, so that I can resume parked work without hunting for the folder.
+- As a **fleet operator**, I want a folder nested inside a repo that isn't its own repo (a scratch folder) to keep its own card, so that unrelated work isn't folded into the project that happens to contain it.
+- As a **developer**, I want the detail panel to stay on the instance I selected even when its card starts showing a different one, so that a nudge I'm typing never goes to the wrong worktree.
+- As a **fleet operator**, I want to switch project cards off (`stacks.enabled`) and get one card per session back, so that I can fall back if folding ever gets in my way.
 
 ## Session observability
 

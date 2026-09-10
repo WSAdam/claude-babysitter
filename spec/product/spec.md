@@ -171,6 +171,12 @@ No database. State is small JSON files in `~/.claude/`, keyed by **stable projec
 session's launch folder) so labels/groups/queues/worklists survive `/clear`, respawn, and
 close/reopen. **[DECISION D-10]**
 
+On top of that, sessions fold into **project cards** (2026-09-10): a session launched at a git
+worktree top-level joins its repo's card (key = the repo's common git dir), so a main checkout
+and its sibling worktrees are one project; everything else stacks by its launch folder. A repo
+card's name is the main checkout's relabel. Display and triage fold; per-session state
+(queues, gate, policies) stays per launch folder. **[DECISION D-11]**
+
 ```
 cc-status/<session_id>.json     live per-session status (hook-written)
 cc-status/<session_id>.decision panel→gate approval decisions

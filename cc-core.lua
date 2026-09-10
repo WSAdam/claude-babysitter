@@ -233,7 +233,9 @@ function M.handleAction(fx, item, action, text)
     kittyWindowId = item.kitty_window_id, kittyListenOn = item.kitty_listen_on,
   }
   if action == "focus" then
-    fx.focusWindow(tgt)
+    -- A jump that landed marks the instance seen: a finished one stops leading its
+    -- project card until it finishes again (M.instanceTier). A miss marks nothing.
+    if fx.focusWindow(tgt) ~= false and fx.markSeen then fx.markSeen(item.key) end
   elseif action == "approve" then
     -- R1-26: approve only via the decision file for a remote tile, and only while
     -- the gate is waiting -- never fall through to actOnWindow on a local window
@@ -584,6 +586,352 @@ function M.dupProjectKeys(list)
   return dup
 end
 
+-- ---- Project stacks (2026-09-10) ---------------------------------------------
+-- Several Claude instances of ONE project -- a repo's main checkout plus its sibling
+-- worktrees (../repo-fix-y), or two sessions in one folder -- fold into one card. The
+-- identity comes from git, never from folder names (canna-fresh is a linked worktree
+-- of Canna-better). The card shows, and double-click jumps to, the instance that most
+-- needs you. Pure here; the dashboard probes git and wires the effects.
+
+-- Which stackKeys have MORE THAN ONE live session (the dupProjectKeys of stacks): every
+-- instance on a multi-instance card gets its own chat title.
+function M.dupStackKeys(list)
+  local seen, dup = {}, {}
+  for _, it in ipairs(list or {}) do
+    local k = type(it) == "table" and (it.stackKey or it.projectKey) or nil
+    if type(k) == "string" and k ~= "" then
+      if seen[k] then dup[k] = true else seen[k] = true end
+    end
+  end
+  return dup
+end
+
+-- Claude Code's project-directory name for a folder (~/.claude/projects/<this>/): every
+-- UTF-16 code unit that isn't [A-Za-z0-9] becomes "-" (JS replace(/[^a-zA-Z0-9]/g,'-')),
+-- so a BMP character is one "-" and an astral one (4-byte UTF-8) is two. Names past 200
+-- chars get a hash suffix Lua can't reproduce -> nil (the session just isn't stacked).
+function M.encodeProjectPath(p)
+  if type(p) ~= "string" or p == "" then return nil end
+  local out, i, n = {}, 1, #p
+  while i <= n do
+    local c = p:byte(i)
+    local len = (c < 0x80 and 1) or (c < 0xE0 and 2) or (c < 0xF0 and 3) or 4
+    if len == 1 then
+      local ch = string.char(c)
+      out[#out + 1] = ch:find("^%w$") and ch or "-"
+    else
+      out[#out + 1] = (len == 4) and "--" or "-"
+    end
+    i = i + len
+  end
+  local s = table.concat(out)
+  if #s > 200 then return nil end
+  return s
+end
+
+-- The session's LAUNCH folder: the first of cwd and its ancestors whose Claude
+-- project-dir name equals projectKey (cwd drifts as the agent cd's; the key never
+-- does). A path-valued key (no transcript, so projectKey fell back to cwd) is already
+-- the folder. nil when nothing matches.
+function M.launchDirFor(projectKey, cwd)
+  if type(projectKey) ~= "string" or projectKey == "" then return nil end
+  if projectKey:sub(1, 1) == "/" then return M.normDir(projectKey) end
+  if type(cwd) ~= "string" or cwd:sub(1, 1) ~= "/" then return nil end
+  local dir = M.normDir(cwd)
+  while true do
+    if M.encodeProjectPath(dir) == projectKey then return dir end
+    if dir == "/" then return nil end
+    dir = dir:match("^(.*)/[^/]+$") or ""
+    if dir == "" then dir = "/" end
+  end
+end
+
+-- The one git probe per launch folder (FX caches it): top-level, common dir, git dir.
+function M.gitIdentityCmd(dir)
+  local q = "'" .. tostring(dir or ""):gsub("'", "'\\''") .. "'"
+  return "git -C " .. q .. " rev-parse --path-format=absolute --show-toplevel --git-common-dir --git-dir 2>/dev/null"
+end
+
+-- Exactly three absolute lines, or nil (not a repo; a bare repo errors on --show-toplevel).
+function M.parseRepoIdentity(out)
+  if type(out) ~= "string" then return nil end
+  local lines = {}
+  for line in out:gmatch("[^\r\n]+") do lines[#lines + 1] = line end
+  if #lines ~= 3 then return nil end
+  for _, l in ipairs(lines) do if l:sub(1, 1) ~= "/" then return nil end end
+  return { toplevel = M.normDir(lines[1]), commonDir = M.normDir(lines[2]), gitDir = M.normDir(lines[3]) }
+end
+
+-- <git-dir>/HEAD: { branch = "fix/y" } or { detached = "<7 hex>" } or nil.
+function M.parseHeadRef(content)
+  if type(content) ~= "string" then return nil end
+  local ref = content:match("^ref:%s*refs/heads/(.-)%s*$")
+  if ref and ref ~= "" then return { branch = ref } end
+  local sha = content:match("^(%x%x%x%x%x%x%x)%x*%s*$")
+  if sha then return { detached = sha } end
+  return nil
+end
+
+-- The main checkout of a repo from its common dir ("/r/main/.git" -> "/r/main"); a bare
+-- repo has none.
+function M.repoMainRoot(commonDir)
+  if type(commonDir) ~= "string" then return nil end
+  return commonDir:match("^(.+)/%.git$")
+end
+
+-- Stamp a session with its stack identity, in place. A session stacks with its repo
+-- ONLY when its launch folder IS a worktree top-level -- a nested folder that isn't its
+-- own repo (Scratch-pad inside this repo) keeps its own card, as do A/B fork-to-compare
+-- variants (under /.cc-ab/: folding them would hide the comparison) and remote tiles.
+-- Everything else stacks by projectKey, so two sessions in one folder still share a card.
+function M.applyStackIdentity(it, launchDir, ident, head, labels)
+  if type(it) ~= "table" then return it end
+  it.repoKey, it.wtRoot, it.mainRoot, it.branch, it.detached, it.isMainWt = nil, nil, nil, nil, nil, nil
+  local own = (type(it.label) == "string" and it.label ~= "" and it.label) or it.autoTitle or it.name
+  if it.remote then
+    local host = type(it.remote) == "table" and it.remote.host or it.remote
+    it.stackKey = "remote:" .. tostring(host) .. "|" .. tostring(it.projectKey or it.cwd or it.key)
+    it.stackName = own
+    return it
+  end
+  local stacked = type(ident) == "table" and launchDir and ident.toplevel == launchDir
+                  and not tostring(launchDir):find("/.cc-ab/", 1, true)
+  if not stacked then
+    it.stackKey = it.projectKey or it.cwd or it.key
+    it.stackName = own
+    return it
+  end
+  it.repoKey = ident.commonDir
+  it.wtRoot = ident.toplevel
+  it.mainRoot = M.repoMainRoot(ident.commonDir)
+  it.isMainWt = (it.mainRoot ~= nil and it.mainRoot == ident.toplevel)
+  if type(head) == "table" then
+    it.branch = head.branch or head.detached
+    it.detached = head.detached and true or nil
+  end
+  it.stackKey = "repo:" .. ident.commonDir
+  local mainKey = it.mainRoot and M.encodeProjectPath(it.mainRoot)
+  local lbl = type(labels) == "table" and mainKey and labels[mainKey] or nil
+  it.stackName = (type(lbl) == "string" and lbl ~= "" and lbl)
+              or (it.mainRoot and it.mainRoot:match("([^/]+)$"))
+              or (ident.commonDir:match("([^/]+)$") or ident.commonDir):gsub("%.git$", "")
+  return it
+end
+
+-- Where "Relabel" on a card writes: the main checkout's key for a repo stack (the key
+-- stackName reads), else the session's own projectKey.
+function M.stackLabelKey(it)
+  if type(it) ~= "table" then return nil end
+  if it.mainRoot then return M.encodeProjectPath(it.mainRoot) end
+  return it.projectKey or it.cwd
+end
+
+-- How badly an instance wants you: 1 approval (incl. a question / gate) · 2 error ·
+-- 3 hung · 4 finished and not jumped-to since it finished · 5 anything else.
+function M.instanceTier(it, seenAt)
+  local st = it and it.status
+  if st == "approval" then return 1 end
+  if st == "error" then return 2 end
+  if it and it.hung then return 3 end
+  if st == "done" and not it.bg_active then
+    local seen = type(seenAt) == "table" and tonumber(seenAt[it.key]) or nil
+    if not seen or seen < (tonumber(it.since) or 0) then return 4 end
+  end
+  return 5
+end
+
+-- Blocked tiers wait longest-first, finished ones freshest-first, the rest most recently
+-- active first. STACK_LEAD_HOLD keeps a stationary lead in place until a challenger is
+-- that many seconds fresher: two working instances would otherwise swap the card (and
+-- force a grid rebuild) on every hook event.
+M.STACK_LEAD_HOLD = 30
+function M.rankInstances(members, seenAt, prevLead)
+  local arr = {}
+  for _, it in ipairs(members or {}) do arr[#arr + 1] = { it = it, tier = M.instanceTier(it, seenAt) } end
+  table.sort(arr, function(a, b)
+    if a.tier ~= b.tier then return a.tier < b.tier end
+    local ai, bi = a.it, b.it
+    if a.tier <= 3 then
+      local as, bs = tonumber(ai.since) or 0, tonumber(bi.since) or 0
+      if as ~= bs then return as < bs end
+    elseif a.tier == 4 then
+      local as, bs = tonumber(ai.since) or 0, tonumber(bi.since) or 0
+      if as ~= bs then return as > bs end
+    else
+      local au, bu = tonumber(ai.updated) or 0, tonumber(bi.updated) or 0
+      if au ~= bu then return au > bu end
+    end
+    return tostring(ai.key) < tostring(bi.key)
+  end)
+  if #arr > 1 and arr[1].tier == 5 and prevLead ~= nil then
+    for i = 2, #arr do
+      local e = arr[i]
+      if e.it.key == prevLead then
+        if e.tier == 5 and (tonumber(arr[1].it.updated) or 0) - (tonumber(e.it.updated) or 0) < M.STACK_LEAD_HOLD then
+          table.remove(arr, i)
+          table.insert(arr, 1, e)
+        end
+        break
+      end
+    end
+  end
+  local out = {}
+  for i, e in ipairs(arr) do out[i] = e.it end
+  return out
+end
+
+-- Fold the visible sessions into stacks and stamp every member: stackLead/stackRank/
+-- stackSize, stackHidden (hidden members -- never a lead, never counted), stackNeeds
+-- (OTHER members blocked on you: the corner button's dot) and stackAlso (the others,
+-- summarised for the card's "also:" line). Returns { [stackKey] = lead key } -- the
+-- next tick's prevLead for the hold.
+local STACK_BUCKETS = { "approval", "error", "hung", "ready", "working", "done", "idle" }
+local function stackBucket(it, seenAt)
+  local tier = M.instanceTier(it, seenAt)
+  return (tier == 1 and "approval") or (tier == 2 and "error") or (tier == 3 and "hung")
+      or (tier == 4 and "ready") or tostring(it.status or "idle")
+end
+function M.stackInstances(shown, seenAt, prevLeads, hidden)
+  prevLeads = type(prevLeads) == "table" and prevLeads or {}
+  local groups, order = {}, {}
+  for _, it in ipairs(shown or {}) do
+    local k = type(it) == "table" and it.stackKey or nil
+    if k then
+      if not groups[k] then groups[k] = {}; order[#order + 1] = k end
+      local g = groups[k]
+      g[#g + 1] = it
+    end
+  end
+  local hiddenN = {}
+  for _, it in ipairs(hidden or {}) do
+    if type(it) == "table" and it.stackKey then hiddenN[it.stackKey] = (hiddenN[it.stackKey] or 0) + 1 end
+  end
+  local leads = {}
+  for _, k in ipairs(order) do
+    local ranked = M.rankInstances(groups[k], seenAt, prevLeads[k])
+    local buckets = {}
+    for i, it in ipairs(ranked) do buckets[i] = stackBucket(it, seenAt) end
+    for i, it in ipairs(ranked) do
+      it.stackLead = (i == 1)
+      it.stackRank = i
+      it.stackSize = #ranked
+      it.stackHidden = hiddenN[k] or 0
+      local counts, needs = {}, 0
+      for j, b in ipairs(buckets) do
+        if j ~= i then
+          counts[b] = (counts[b] or 0) + 1
+          if b == "approval" or b == "error" or b == "hung" then needs = needs + 1 end
+        end
+      end
+      local also = {}
+      for _, b in ipairs(STACK_BUCKETS) do
+        if counts[b] then also[#also + 1] = { b = b, n = counts[b] } end
+      end
+      it.stackNeeds = needs
+      it.stackAlso = also
+    end
+    leads[k] = ranked[1].key
+  end
+  return leads
+end
+
+-- Parse `git worktree list --porcelain` (newline form, or -z: NUL-separated fields,
+-- records split by an empty field) into { path, head, branch, detached, bare, locked,
+-- prunable } entries. The branch drops refs/heads/.
+function M.parseWorktreePorcelain(text)
+  local out = {}
+  if type(text) ~= "string" or text == "" then return out end
+  local sep = text:find("\0", 1, true) and "\0" or "\n"
+  local cur
+  local function flush() if cur and cur.path then out[#out + 1] = cur end; cur = nil end
+  local i = 1
+  while i <= #text + 1 do
+    local j = text:find(sep, i, true) or (#text + 1)
+    local line = text:sub(i, j - 1):gsub("\r$", "")
+    if line == "" then
+      flush()
+    elseif line:sub(1, 9) == "worktree " then
+      flush()
+      cur = { path = M.normDir(line:sub(10)) }
+    elseif cur then
+      if line:sub(1, 5) == "HEAD " then cur.head = line:sub(6)
+      elseif line:sub(1, 7) == "branch " then cur.branch = line:sub(8):gsub("^refs/heads/", "")
+      elseif line == "detached" then cur.detached = true
+      elseif line == "bare" then cur.bare = true
+      elseif line == "locked" or line:sub(1, 7) == "locked " then cur.locked = true
+      elseif line == "prunable" or line:sub(1, 9) == "prunable " then cur.prunable = true
+      end
+    end
+    i = j + 1
+  end
+  flush()
+  return out
+end
+
+-- May "Open" start a session in `path`? Only a worktree the repo itself lists (a path
+-- from the webview is never trusted), that exists, isn't bare or prunable, has no
+-- session already (hidden ones included), and isn't mid-open. Returns ok, reason.
+function M.openWorktreeVerdict(entries, path, liveRoots, opts)
+  opts = opts or {}
+  path = M.normDir(tostring(path or ""))
+  if path == "" then return false, "no worktree path" end
+  local hit
+  for _, e in ipairs(entries or {}) do
+    if type(e) == "table" and M.normDir(tostring(e.path or "")) == path then hit = e; break end
+  end
+  if not hit then return false, "not a worktree of this repo" end
+  if hit.bare then return false, "a bare repository has no working tree" end
+  if hit.prunable then return false, "the worktree's folder is gone" end
+  if opts.exists and not opts.exists(path) then return false, "the worktree's folder is gone" end
+  if type(liveRoots) == "table" and liveRoots[path] then return false, "it already has a session" end
+  if type(opts.pending) == "table" and opts.pending[path] then return false, "it's already opening" end
+  return true
+end
+
+-- The Instances view's payload. Rows never carry a prompt body -- only what identifies an
+-- instance and what it waits on. Members sort main checkout first, then by folder, so a
+-- live re-render never jumps a row under the pointer; the lead is marked, not moved.
+-- Worktrees listed are the ones with no session at all (live or hidden), minus bare /
+-- prunable entries.
+function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
+  opts = opts or {}
+  local rows, taken = {}, {}
+  local function row(it, isHidden)
+    local root = it.wtRoot or it.cwd
+    if root then taken[M.normDir(root)] = true end
+    local ps = type(it.pending) == "table" and type(it.pending.summary) == "string" and it.pending.summary or nil
+    if ps and #ps > 160 then ps = ps:sub(1, 157) .. "..." end
+    rows[#rows + 1] = {
+      key = it.key, folder = root and root:match("([^/]+)/?$") or it.name, label = it.label,
+      sessTitle = it.sessTitle, status = it.status, hung = it.hung and true or nil,
+      stale = it.stale and true or nil, since = it.since, updated = it.updated,
+      hidden = isHidden or nil, lead = it.stackLead and true or nil, rank = it.stackRank,
+      wtRoot = it.wtRoot, branch = it.branch, detached = it.detached, isMainWt = it.isMainWt,
+      editor = it.editor, pendingSummary = (it.status == "approval") and ps or nil,
+      bgActive = it.bg_active and true or nil,
+    }
+  end
+  for _, it in ipairs(members or {}) do row(it, false) end
+  for _, it in ipairs(hidden or {}) do row(it, true) end
+  table.sort(rows, function(a, b)
+    if (a.isMainWt and 1 or 0) ~= (b.isMainWt and 1 or 0) then return a.isMainWt == true end
+    if (a.hidden and 1 or 0) ~= (b.hidden and 1 or 0) then return not a.hidden end
+    local af, bf = tostring(a.folder or ""):lower(), tostring(b.folder or ""):lower()
+    if af ~= bf then return af < bf end
+    return tostring(a.key) < tostring(b.key)
+  end)
+  local idle = {}
+  for _, w in ipairs(worktrees or {}) do
+    if type(w) == "table" and w.path and not w.bare and not w.prunable and not taken[M.normDir(w.path)] then
+      idle[#idle + 1] = { path = w.path, folder = w.path:match("([^/]+)/?$"), branch = w.branch,
+        detached = w.detached and true or nil, isMain = (opts.mainRoot ~= nil and w.path == opts.mainRoot) or nil,
+        pending = type(opts.pending) == "table" and opts.pending[w.path] and true or nil }
+    end
+  end
+  return { stackKey = stackKey, stackName = opts.stackName, repoKey = opts.repoKey, mainRoot = opts.mainRoot,
+           gone = (#rows == 0), members = rows, worktrees = idle, listError = opts.listError }
+end
+
 -- ---- Lockscreen board (what the lock overlay draws) -------------------------
 -- The lock is up for hours while the fleet keeps working, so the overlay answers
 -- one question at a glance: is anything running, and does anything want me? Both
@@ -658,9 +1006,12 @@ function M.lockBoard(list, maxN)
       local st = tostring(it.status or "")
       if RANK[st] then
         counts[st] = counts[st] + 1
-        local k = it.projectKey or it.cwd or it.name
+        -- one ring per PROJECT CARD: a repo's worktrees share its stackKey (and so
+        -- one ring and one colour that can't change when the card's lead does)
+        local k = it.stackKey or it.projectKey or it.cwd or it.name
         if type(k) == "string" and k ~= "" then
-          local label = (type(it.label) == "string" and it.label ~= "" and it.label)
+          local label = (type(it.stackName) == "string" and it.stackName ~= "" and it.stackName)
+                     or (type(it.label) == "string" and it.label ~= "" and it.label)
                      or (type(it.autoTitle) == "string" and it.autoTitle ~= "" and it.autoTitle)
                      or (type(it.name) == "string" and it.name ~= "" and it.name)
                      or M.projectKeyLabel(k)
@@ -823,8 +1174,9 @@ end
 
 -- ---- Tile filter / search (free-text) --------------------------------------
 -- Filter a session list by a free-text query (case-insensitive, token-AND). The
--- searchable text is label + name + cwd + projectKey + status + group, in that order
--- -- MIRRORED in the panel JS, which must stay in sync. A blank query is a pass-through.
+-- searchable text is label + name + cwd + projectKey + status + group + branch +
+-- chat title + stack name, in that order -- MIRRORED in the panel JS (tileMatches),
+-- which must stay in sync. A blank query is a pass-through.
 -- Used by the search bar (via the JS twin) and the bulk-action path (Lua side, to
 -- scope actions to what the operator currently sees).
 function M.filterTiles(list, query)
@@ -835,7 +1187,7 @@ function M.filterTiles(list, query)
   for _, it in ipairs(list or {}) do
     local hay = string.lower(table.concat({
       it.label or "", it.name or "", it.cwd or "", it.projectKey or "",
-      it.status or "", it.group or "",
+      it.status or "", it.group or "", it.branch or "", it.sessTitle or "", it.stackName or "",
     }, " "))
     local all = true
     for _, t in ipairs(toks) do
@@ -10107,6 +10459,9 @@ M.FEATURES = {
   { key = "groups", cat = "Core", title = "Groups & labels",
     what = "Rename tiles and bucket them into cohorts, then scope the grid to one group.",
     why = "Keep a big fleet organized and filter down to just what you're working on." },
+  { key = "stacks", cat = "Core", new = true, title = "Project cards & instances",
+    what = "A repo's main checkout and its worktrees — or two sessions in one folder — share one card that shows whichever instance needs you. The corner button lists every instance, and the worktrees with no session so you can open one.",
+    why = "Parallel units of work on one project read as one project, and a double-click always lands on the instance that's waiting." },
 
   -- ---- Control ----
   { key = "gate", cat = "Control", title = "Headless approvals",

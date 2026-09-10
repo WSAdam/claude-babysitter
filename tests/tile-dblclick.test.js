@@ -28,7 +28,7 @@ function slice(startNeedle, endNeedle) {
   const j = src.indexOf(endNeedle, i);
   return j < 0 ? null : src.slice(i, j);
 }
-const code = slice("    var tileDblState = null;", "    function tileActivate(key){");
+const code = slice("    var tileDblState = null;", "    function tileActivate(");
 check("extracted the tile press logic from the panel source", code !== null);
 if (!code) {
   console.log("-- tile-dblclick.test.js: " + run + " run, " + failed + " failed --");
@@ -39,14 +39,16 @@ if (!code) {
 function panel() {
   const p = { now: 100000, selected: [], jumped: [] };
   const fakeDate = { now: () => p.now };
+  p.cards = [];
   const api = new Function("selectTile", "tileActivate", "Date",
     code + "\nreturn { down: onGridMouseDown, step: tileDblStep };")(
-    (k) => p.selected.push(k), (k) => p.jumped.push(k), fakeDate);
+    (k) => p.selected.push(k), (k, stack) => { p.jumped.push(k); p.cards.push(stack || null); }, fakeDate);
   p.down = api.down; p.step = api.step;
-  // a press on a tile (a NEW node object each time -- grid rebuilds replace them)
+  // a press on a tile (a NEW node object each time -- grid rebuilds replace them);
+  // opts.stack = the card's data-stack (project stacks)
   p.press = (key, detail, opts) => {
     opts = opts || {};
-    const tile = { getAttribute: (n) => (n === "data-key" ? key : null) };
+    const tile = { getAttribute: (n) => (n === "data-key" ? key : n === "data-stack" ? (opts.stack || null) : null) };
     const badge = { closest: (s) => (s === ".tile" ? tile : s === "[data-nodbl]" ? badge : null) };
     const plain = { closest: (s) => (s === ".tile" ? tile : null) };
     p.down({ button: opts.button === undefined ? 0 : opts.button, detail: detail,
@@ -103,6 +105,16 @@ eq("a double-click whose first press was swallowed (panel activation) still jump
 p = panel();
 p.press("k2", 1); p.wait(5000); p.press("k1", 2);
 eq("a stale press on another tile seconds ago doesn't veto a real double-click", p.jumped.join(","), "k1");
+
+// 2026-09-10 project stacks: a card pairs on its STACK -- between the two presses the card
+// may start drawing a different instance (a new lead), and that is still one double-click
+p = panel();
+p.press("k1", 1, { stack: "repo:/r/.git" }); p.wait(150); p.press("k2", 2, { stack: "repo:/r/.git" });
+eq("a lead change between the presses (same card) still jumps once", p.jumped.length, 1);
+eq("...and the jump carries the card's stack (focus-group)", p.cards.join(","), "repo:/r/.git");
+p = panel();
+p.press("k1", 1, { stack: "repo:/a/.git" }); p.wait(150); p.press("k2", 2, { stack: "repo:/b/.git" });
+eq("a press pair spanning two different cards never jumps", p.jumped.length, 0);
 
 console.log("-- tile-dblclick.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed ? 1 : 0);

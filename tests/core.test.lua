@@ -7866,7 +7866,8 @@ do
   check("FEATURES: lists the user-stories tab", keys.stories == true)
   local newCount = 0; for _, f in ipairs(core.FEATURES) do if f.new then newCount = newCount + 1 end end
   -- 2026-08-31: 6 -> 7 when the worklist gained the TODO.md import (re-flagged new).
-  eq("FEATURES: the 7 new features are flagged", newCount, 7)
+  -- 2026-09-10: 7 -> 8 for project cards & instances ("stacks", flagged new).
+  eq("FEATURES: the 8 new features are flagged", newCount, 8)
 end
 
 -- F4: transcript peek (user + assistant rows, chronological, noise filtered)
@@ -8164,6 +8165,208 @@ do
   -- plain ASCII behavior is unchanged (exact bytes, incl. the maxLen backstop)
   local res5 = core.parseSearchResults("/f.jsonl:5:" .. string.rep("x", 300) .. "\n", { maxLen = 10 })
   eq("#16: ASCII maxLen behavior unchanged", res5.hits[1].text, string.rep("x", 10) .. "\226\128\166")
+end
+
+-- ---- Project stacks: identity (2026-09-10) ----------------------------------
+-- A repo's main checkout and its sibling worktrees (../repo-fix-y) are one project.
+-- Identity comes from git (canna-fresh is a linked worktree of Canna-better -- no
+-- shared prefix), and only a session LAUNCHED at a worktree top-level stacks: a
+-- nested folder that isn't its own repo (Scratch-pad inside this repo) keeps its card.
+do
+  eq("encode: mirrors Claude Code's project-dir name",
+     core.encodeProjectPath("/Users/adam/Programming/claude-instance-manager"),
+     "-Users-adam-Programming-claude-instance-manager")
+  eq("encode: dots, spaces and underscores all become -", core.encodeProjectPath("/a/.b c_d"), "-a--b-c-d")
+  eq("encode: a BMP character is one -, an astral one is two",
+     core.encodeProjectPath("/a/\195\169/\240\159\152\128"), "-a---" .. "--")
+  eq("encode: a name past 200 chars (hashed by Claude Code) can't be reproduced -> nil",
+     core.encodeProjectPath("/" .. string.rep("x", 200)), nil)
+
+  local pk = core.encodeProjectPath("/Users/adam/Programming/Voice-Agent")
+  eq("launchDir: survives a cd into a subfolder",
+     core.launchDirFor(pk, "/Users/adam/Programming/Voice-Agent/voice-agent/src"), "/Users/adam/Programming/Voice-Agent")
+  eq("launchDir: a path-valued key (no transcript) is already the folder",
+     core.launchDirFor("/Users/adam/p", "/Users/adam/p/sub"), "/Users/adam/p")
+  eq("launchDir: no ancestor encodes to the key -> nil", core.launchDirFor("-nope", "/Users/adam/p"), nil)
+  eq("launchDir: a relative cwd -> nil", core.launchDirFor("-x", "rel/dir"), nil)
+
+  local out = "/Users/adam/Programming/canna-fresh\n/Users/adam/Programming/Canna-better/.git\n"
+           .. "/Users/adam/Programming/Canna-better/.git/worktrees/canna-fresh\n"
+  local id = core.parseRepoIdentity(out)
+  eq("repoIdentity: toplevel", id and id.toplevel, "/Users/adam/Programming/canna-fresh")
+  eq("repoIdentity: common dir", id and id.commonDir, "/Users/adam/Programming/Canna-better/.git")
+  eq("repoIdentity: not a repo (empty output) -> nil", core.parseRepoIdentity(""), nil)
+  eq("repoIdentity: a relative line -> nil", core.parseRepoIdentity("a\nb\nc\n"), nil)
+  eq("repoIdentity: two lines (bare repo errors) -> nil", core.parseRepoIdentity("/a\n/b\n"), nil)
+  check("repoIdentity: the probe is quoted and absolute",
+        core.gitIdentityCmd("/a/it's"):find("git -C '/a/it'\\''s' rev-parse --path-format=absolute --show-toplevel --git-common-dir --git-dir", 1, true) ~= nil)
+
+  eq("head: a branch", (core.parseHeadRef("ref: refs/heads/fix/tile-flash\n") or {}).branch, "fix/tile-flash")
+  eq("head: detached -> short sha", (core.parseHeadRef("3a00a1ed7664177a811a3331cbe6d4f9144a6f0a\n") or {}).detached, "3a00a1e")
+  eq("head: garbage -> nil", core.parseHeadRef("nonsense"), nil)
+  eq("mainRoot: strips /.git", core.repoMainRoot("/Users/adam/Programming/Canna-better/.git"), "/Users/adam/Programming/Canna-better")
+  eq("mainRoot: a bare repo has none", core.repoMainRoot("/srv/repo.git"), nil)
+
+  local function mkIt(k, cwd, launch) return { key = k, name = cwd:match("([^/]+)$"), cwd = cwd,
+    projectKey = core.encodeProjectPath(launch or cwd) } end
+  local main = core.applyStackIdentity(mkIt("m", "/Users/adam/Programming/Canna-better"),
+    "/Users/adam/Programming/Canna-better",
+    { toplevel = "/Users/adam/Programming/Canna-better", commonDir = "/Users/adam/Programming/Canna-better/.git",
+      gitDir = "/Users/adam/Programming/Canna-better/.git" }, { branch = "wordpress" }, {})
+  local wt = core.applyStackIdentity(mkIt("w", "/Users/adam/Programming/canna-fresh"),
+    "/Users/adam/Programming/canna-fresh", id, { branch = "main" }, {})
+  eq("stack: a linked worktree joins its main checkout's card (canna-fresh -> Canna-better)", wt.stackKey, main.stackKey)
+  eq("stack: the main checkout is marked", main.isMainWt, true)
+  eq("stack: the linked worktree isn't", wt.isMainWt, false)
+  eq("stack: the worktree carries its branch", wt.branch, "main")
+  eq("stack: the card is named for the main checkout", wt.stackName, "Canna-better")
+  local lab = core.applyStackIdentity(mkIt("w2", "/Users/adam/Programming/canna-fresh"),
+    "/Users/adam/Programming/canna-fresh", id, nil,
+    { [core.encodeProjectPath("/Users/adam/Programming/Canna-better")] = "Canna" })
+  eq("stack: the main checkout's relabel names the whole card", lab.stackName, "Canna")
+  eq("stack: relabelling a card targets the main checkout's key", core.stackLabelKey(lab),
+     core.encodeProjectPath("/Users/adam/Programming/Canna-better"))
+
+  local scratch = core.applyStackIdentity(mkIt("s", "/Users/adam/Programming/claude-instance-manager/Scratch-pad"),
+    "/Users/adam/Programming/claude-instance-manager/Scratch-pad",
+    { toplevel = "/Users/adam/Programming/claude-instance-manager",
+      commonDir = "/Users/adam/Programming/claude-instance-manager/.git",
+      gitDir = "/Users/adam/Programming/claude-instance-manager/.git" }, nil, {})
+  eq("stack: a nested non-repo folder (Scratch-pad) keeps its own card", scratch.stackKey, scratch.projectKey)
+  eq("stack: ...and carries no repo identity", scratch.repoKey, nil)
+  local sub = core.applyStackIdentity(mkIt("x", "/r/main/server", "/r/main"), "/r/main",
+    { toplevel = "/r/main", commonDir = "/r/main/.git", gitDir = "/r/main/.git" }, nil, {})
+  eq("stack: a session that cd'd into a subfolder stays on its repo card", sub.stackKey, "repo:/r/main/.git")
+  local ab = core.applyStackIdentity(mkIt("a", "/r/.cc-ab/main-c1-opus"), "/r/.cc-ab/main-c1-opus",
+    { toplevel = "/r/.cc-ab/main-c1-opus", commonDir = "/r/main/.git", gitDir = "/r/main/.git/worktrees/x" }, nil, {})
+  eq("stack: A/B fork-to-compare worktrees keep their own cards", ab.stackKey, ab.projectKey)
+  local rem = core.applyStackIdentity({ key = "r", name = "p", cwd = "/r/main", projectKey = "-r-main",
+    remote = { host = "box" } }, "/r/main", { toplevel = "/r/main", commonDir = "/r/main/.git", gitDir = "/r/main/.git" }, nil, {})
+  eq("stack: a remote tile never shares a stack with a local one", rem.stackKey, "remote:box|-r-main")
+  local plainA = core.applyStackIdentity({ key = "p1", name = "notes", cwd = "/n", projectKey = "-n" }, "/n", nil, nil, {})
+  local plainB = core.applyStackIdentity({ key = "p2", name = "notes", cwd = "/n", projectKey = "-n" }, "/n", nil, nil, {})
+  eq("stack: two sessions in one plain folder share a card", plainA.stackKey, plainB.stackKey)
+end
+
+-- ---- Project stacks: which instance leads a card (2026-09-10) ---------------
+-- The card shows -- and double-click jumps to -- the instance that most needs you:
+-- blocked (approval > error > hung, longest-waiting first), then a finished one you
+-- haven't jumped to since it finished (newest first), else the most recently active.
+do
+  local function m(k, st, since, updated, extra)
+    local t = { key = k, status = st, since = since, updated = updated or since, stackKey = "repo:/x/.git" }
+    for kk, v in pairs(extra or {}) do t[kk] = v end
+    return t
+  end
+  local order = function(ranked) local o = {} for i, it in ipairs(ranked) do o[i] = it.key end return table.concat(o, ",") end
+  eq("lead: approval beats error beats hung beats ready beats working",
+     order(core.rankInstances({ m("w", "working", 1), m("r", "done", 5), m("h", "working", 2, 2, { hung = true }),
+                                m("e", "error", 3), m("a", "approval", 4) }, {})), "a,e,h,r,w")
+  eq("lead: two blocked instances -> the one waiting longest first",
+     order(core.rankInstances({ m("new", "approval", 50), m("old", "approval", 10) }, {})), "old,new")
+  eq("lead: two finished, unseen -> the newest result first",
+     order(core.rankInstances({ m("early", "done", 10), m("late", "done", 50) }, {})), "late,early")
+  eq("lead: a finished instance you've jumped to since it finished stops outranking",
+     order(core.rankInstances({ m("seen", "done", 10, 10), m("busy", "working", 5, 40) }, { seen = 20 })), "busy,seen")
+  eq("lead: ...until it finishes again", core.instanceTier(m("seen", "done", 30), { seen = 20 }), 4)
+  eq("lead: a finished one still running background agents isn't waiting on you",
+     core.instanceTier(m("bg", "done", 10, 10, { bg_active = true }), {}), 5)
+  eq("lead: nothing needs you -> the most recently active",
+     order(core.rankInstances({ m("idle", "idle", 1, 100), m("work", "working", 1, 200) }, {})), "work,idle")
+  eq("lead: two working instances don't swap on every hook event (30s hold)",
+     core.rankInstances({ m("a", "working", 1, 110), m("b", "working", 1, 100) }, {}, "b")[1].key, "b")
+  eq("lead: ...but a challenger 30s fresher takes over",
+     core.rankInstances({ m("a", "working", 1, 140), m("b", "working", 1, 100) }, {}, "b")[1].key, "a")
+  eq("lead: the hold never keeps a stationary lead over one that needs you",
+     core.rankInstances({ m("a", "approval", 1, 1), m("b", "working", 1, 100) }, {}, "b")[1].key, "a")
+
+  local shown = { m("w", "working", 1, 10), m("a", "approval", 5), m("i", "idle", 1, 3) }
+  local hidden = { m("hid", "approval", 1) }
+  local leads = core.stackInstances(shown, {}, {}, hidden)
+  eq("stackInstances: one lead per stack", leads["repo:/x/.git"], "a")
+  local byK = {} for _, it in ipairs(shown) do byK[it.key] = it end
+  eq("stackInstances: the lead is flagged", byK.a.stackLead, true)
+  eq("stackInstances: the others aren't", byK.w.stackLead, false)
+  eq("stackInstances: size counts visible instances", byK.w.stackSize, 3)
+  eq("stackInstances: hidden instances never lead a card", byK.a.stackRank, 1)
+  eq("stackInstances: ...but are counted apart", byK.a.stackHidden, 1)
+  eq("stackInstances: the lead's dot counts OTHER instances that need you", byK.a.stackNeeds, 0)
+  eq("stackInstances: a non-lead's dot counts the blocked lead", byK.w.stackNeeds, 1)
+  local also = {} for _, e in ipairs(byK.a.stackAlso or {}) do also[#also + 1] = e.n .. " " .. e.b end
+  eq("stackInstances: the lead's 'also' line summarises the others", table.concat(also, " · "), "1 working · 1 idle")
+end
+
+-- ---- Project stacks: worktrees + opening one (2026-09-10) -------------------
+do
+  local z = "worktree /r/main\0HEAD 5878dc4\0branch refs/heads/main\0\0"
+         .. "worktree /r/main-fix\0HEAD 3a00a1e\0branch refs/heads/fix/y\0\0"
+         .. "worktree /r/det\0HEAD 6eec92b\0detached\0\0"
+         .. "worktree /r/gone\0HEAD 1111111\0branch refs/heads/old\0locked\0prunable gitdir file points to non-existent location\0\0"
+  local wts = core.parseWorktreePorcelain(z)
+  eq("porcelain -z: every worktree", #wts, 4)
+  eq("porcelain -z: branch without refs/heads/", wts[2].branch, "fix/y")
+  eq("porcelain -z: detached", wts[3].detached, true)
+  eq("porcelain -z: locked + prunable", (wts[4].locked and wts[4].prunable) and true or false, true)
+  local nl = core.parseWorktreePorcelain("worktree /srv/r.git\nbare\n\nworktree /srv/wt\nHEAD abc\nbranch refs/heads/x\n")
+  eq("porcelain newline form: bare repo", nl[1].bare, true)
+  eq("porcelain newline form: second record", nl[2].branch, "x")
+  eq("porcelain: nothing -> empty list", #core.parseWorktreePorcelain(""), 0)
+
+  local exists = function(p) return p ~= "/r/vanished" end
+  local all = { { path = "/r/main" }, { path = "/r/main-fix" }, { path = "/r/gone", prunable = true },
+                { path = "/srv/r.git", bare = true }, { path = "/r/vanished" } }
+  eq("open: a listed idle worktree may open", (core.openWorktreeVerdict(all, "/r/main-fix", {}, { exists = exists })), true)
+  eq("open: refuses a path the repo doesn't list (no path injection)",
+     (core.openWorktreeVerdict(all, "/etc", {}, { exists = exists })), false)
+  eq("open: refuses a prunable worktree", (core.openWorktreeVerdict(all, "/r/gone", {}, {})), false)
+  eq("open: refuses a bare repo", (core.openWorktreeVerdict(all, "/srv/r.git", {}, {})), false)
+  eq("open: refuses a folder that vanished", (core.openWorktreeVerdict(all, "/r/vanished", {}, { exists = exists })), false)
+  eq("open: refuses a worktree that already hosts a session (hidden included)",
+     (core.openWorktreeVerdict(all, "/r/main-fix", { ["/r/main-fix"] = true }, { exists = exists })), false)
+  eq("open: refuses a second click while one is opening",
+     (core.openWorktreeVerdict(all, "/r/main-fix", {}, { exists = exists, pending = { ["/r/main-fix"] = true } })), false)
+  eq("open: a trailing slash still matches the listing", (core.openWorktreeVerdict(all, "/r/main-fix/", {}, { exists = exists })), true)
+
+  local members = { { key = "k1", stackKey = "repo:/r/main/.git", wtRoot = "/r/main", cwd = "/r/main", branch = "main",
+                      isMainWt = true, status = "idle", since = 1, updated = 5, stackRank = 2, name = "main" },
+                    { key = "k2", stackKey = "repo:/r/main/.git", wtRoot = "/r/main-fix", cwd = "/r/main-fix", branch = "fix/y",
+                      status = "approval", since = 3, updated = 3, stackRank = 1, stackLead = true, name = "main-fix",
+                      pending = { summary = "Allow Bash: make test", prompt = "SECRET BODY" } } }
+  local p = core.instancesPayload("repo:/r/main/.git", members, {}, wts,
+    { stackName = "main", mainRoot = "/r/main", repoKey = "/r/main/.git" })
+  eq("instances: rows list the main checkout first", p.members[1].key, "k1")
+  eq("instances: the lead is marked", p.members[2].lead, true)
+  eq("instances: a pending approval shows its summary", p.members[2].pendingSummary, "Allow Bash: make test")
+  check("instances: never carries a prompt body", not core.json.encode(p):find("SECRET BODY", 1, true))
+  local idle = {} for _, w in ipairs(p.worktrees) do idle[#idle + 1] = w.path end
+  eq("instances: lists only worktrees with no session (not prunable)", table.concat(idle, ","), "/r/det")
+  eq("instances: an emptied stack says so", core.instancesPayload("repo:/q", {}, {}, {}, {}).gone, true)
+end
+
+-- ---- Project stacks: the rest of the fleet follows the stack (2026-09-10) ---
+do
+  local b = core.lockBoard({ { status = "working", stackKey = "repo:/r/.git", stackName = "Repo", projectKey = "-r", name = "r" },
+                             { status = "approval", stackKey = "repo:/r/.git", stackName = "Repo", projectKey = "-r-fix", name = "r-fix" } })
+  eq("lockBoard: the lock screen shows one ring per repo", #b.entries, 1)
+  eq("lockBoard: ...named for the repo, in its loudest state", b.entries[1].label .. "/" .. b.entries[1].state, "Repo/approval")
+  eq("filter: a worktree's branch finds its session",
+     #core.filterTiles({ { name = "r", branch = "fix/tile-flash" } }, "tile-flash"), 1)
+  eq("filter: a chat title finds its session", #core.filterTiles({ { name = "r", sessTitle = "Refactor auth" } }, "auth"), 1)
+  eq("filter: the stack name finds its sessions", #core.filterTiles({ { name = "r-fix", stackName = "Shepherd" } }, "shepherd"), 1)
+  local dups = core.dupStackKeys({ { stackKey = "s1", projectKey = "a" }, { stackKey = "s1", projectKey = "b" }, { projectKey = "c" } })
+  eq("chat titles: every instance of a multi-instance card gets one", dups.s1, true)
+  eq("chat titles: a lone session keeps its clean card", dups.c, nil)
+
+  -- a jump marks the session seen only when it actually landed
+  local r = newRecorder()
+  local seen = {}
+  r.fx.markSeen = function(k) seen[#seen + 1] = k end
+  core.handleAction(r.fx, { key = "k9", name = "p", cwd = "/p" }, "focus")
+  eq("seen: a landed jump marks the instance seen", seen[1], "k9")
+  eq("seen: the recorder's last call is still the focus", r.last().op, "focusWindow")
+  r.fx.focusWindow = function() return false end
+  core.handleAction(r.fx, { key = "k8", name = "p", cwd = "/p" }, "focus")
+  eq("seen: a jump that found no window marks nothing", seen[2], nil)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

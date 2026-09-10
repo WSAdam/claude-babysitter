@@ -1556,6 +1556,61 @@ do
         src:find('var key = tile.getAttribute("data-key");\n      if(!key) return;', 1, true) ~= nil)
   check("tile-press-pin: the PR badge owns its own press (data-nodbl)",
         src:find('data-nodbl onclick="openPr(event)"', 1, true) ~= nil)
+
+  -- ---- Project stacks: the wiring the behavioural tests can't see (2026-09-10) ----
+  -- behaviour: core.test.lua (identity, lead, worktrees, payload), tests/stack-fold.test.js
+  -- (fold + card extras), tests/tile-dblclick.test.js (stack pairing).
+  check("stacks-pin: a card double-click jumps via focus-group with its visible members",
+        src:find('send("focus-group", stack, JSON.stringify(cardKeysFor(stack)))', 1, true) ~= nil)
+  check("stacks-pin: a card pairs its double-click on the stack (a lead change mid-pair still counts)",
+        src:find("tileDblStep(tileDblState, stack || key, Date.now(), e.detail, nodbl)", 1, true) ~= nil)
+  check("stacks-pin: focus-group picks from fresh state and goes through dispatchSerialized",
+        src:find('local lead = core.rankInstances(members, FX.seenAt(), (FX._stackLeads or {})[sk])[1]', 1, true) ~= nil
+        and src:find('dispatchSerialized(lead, "focus", function() core.handleAction(FX, lead, "focus") end)', 1, true) ~= nil)
+  do
+    local iGroup = src:find('if a == "focus-group" then', 1, true)
+    local iOpen  = src:find('if a == "open-worktree" then', 1, true)
+    -- the GENERIC session-key lookup (action branches above it carry their own copies)
+    local iByKey = src:find("for unknown key \" .. tostring(payload.v))", 1, true)
+    check("stacks-pin: stack-keyed actions are handled before the session-key lookup",
+          iGroup and iOpen and iByKey and iGroup < iByKey and iOpen < iByKey or false)
+  end
+  check("stacks-pin: Open spawns only after the repo-listing verdict",
+        src:find("local ok, why = core.openWorktreeVerdict(wts, target, live, {", 1, true) ~= nil
+        and src:find("local launched = FX.spawnSession(editor, target, nil, nil, nil, nil, true)", 1, true) ~= nil)
+  do
+    local iLabels = src:find("core.applyLabelsByCwd(list, labels)", 1, true)
+    local iAnn    = src:find("  FX.annotateStacks(list, labels, cfg)", 1, true)
+    local iDup    = src:find("local dupKeys = core.dupStackKeys(list)", 1, true)
+    local iPart   = src:find("shownList, hiddenList, stale = core.partitionHidden(list, hiddenMap)", 1, true)
+    local iRank   = src:find("FX._stackLeads = core.stackInstances(shownList, FX.seenAt(), FX._stackLeads, hiddenList)", 1, true)
+    check("stacks-pin: tick order -- relabels, stack identity, chat titles, hidden split, ranking",
+          iLabels and iAnn and iDup and iPart and iRank
+          and iLabels < iAnn and iAnn < iDup and iDup < iPart and iPart < iRank or false)
+  end
+  check("stacks-pin: the Stream Deck still gets one key per session", src:find("sdRender(shownList)", 1, true) ~= nil)
+  check("stacks-pin: new state hangs off FX (the main chunk is at the 200-local cap)",
+        src:find("^local stackLeads", 1) == nil and src:find("FX._stackLeads", 1, true) ~= nil
+        and src:find("FX._instancesView", 1, true) ~= nil)
+  check("stacks-pin: relabel on a card names the repo (the main checkout's key)",
+        src:find("local lkey = core.stackLabelKey(item) or item.projectKey or item.cwd", 1, true) ~= nil)
+  check("stacks-pin: the right-click menu opens Instances (a reliable native path)",
+        src:find('wv:evaluateJavaScript("openInstancesFor(" .. jsString(item.stackKey) .. ")")', 1, true) ~= nil)
+  check("stacks-pin: seen state persists (a reload doesn't re-promote finished sessions)",
+        src:find('hs.settings.set("ccSeenAt", s)', 1, true) ~= nil and src:find("function FX.seedSeen(list)", 1, true) ~= nil)
+  check("stacks-pin: the Instances view drops a reply for a card it left, keeps scroll, reads keys from data attributes",
+        src:find("if(!p || !INST.stackKey || p.stackKey !== INST.stackKey) return;", 1, true) ~= nil
+        and src:find("body.scrollTop = y;", 1, true) ~= nil
+        and src:find('closest("[data-inact]")', 1, true) ~= nil
+        and src:find("data-inact=\"focus\" data-k=\"' + esc(im.key)", 1, true) ~= nil)
+  check("stacks-pin: the Instances view never rebuilds a row mid-click (press guard)",
+        src:find("if(INST.pressing){ INST.deferred = true; return; }", 1, true) ~= nil)
+  check("stacks-pin: Esc and a backdrop click close the Instances view",
+        src:find('if(ov && ov.classList.contains("show")) closeInstances();', 1, true) ~= nil
+        and src:find('onclick="instBackdrop(event)"', 1, true) ~= nil)
+  check("stacks-pin: closing the view stops Lua pushing it", src:find('send("close-instances");', 1, true) ~= nil)
+  check("stacks-pin: the kill switch strips stack fields (one card per session)",
+        src:find('if core.config(cfg, "stacks.enabled", true) == false then', 1, true) ~= nil)
   check("l5pr-pin: open-url validates scheme via pure core.isOpenableUrl",
         src:find("core.isOpenableUrl(url)", 1, true) ~= nil
         and src:find("hs.urlevent.openURL(url)", 1, true) ~= nil)
@@ -2137,10 +2192,13 @@ do
   local f = io.open(ROOT .. "claude-dashboard.lua", "r")
   local src = f and f:read("*a") or ""
   if f then f:close() end
-  check("sessTitle: the tick asks core which projects are doubled up",
-        src:find("local dupKeys = core.dupProjectKeys(list)", 1, true) ~= nil)
-  check("sessTitle: ONLY doubled-up projects get a per-session title",
-        src:find("if it.projectKey and dupKeys[it.projectKey] then", 1, true) ~= nil
+  -- REQUIREMENT CHANGE 2026-09-10 (project stacks): a repo's worktrees now share ONE
+  -- card, so "doubled up" is per STACK, not per projectKey -- every instance on a
+  -- multi-instance card names its chat (behaviour: core.dupStackKeys in core.test.lua).
+  check("sessTitle: the tick asks core which project CARDS hold more than one session",
+        src:find("local dupKeys = core.dupStackKeys(list)", 1, true) ~= nil)
+  check("sessTitle: ONLY multi-instance cards get a per-session title",
+        src:find("if (it.stackKey or it.projectKey) and dupKeys[it.stackKey or it.projectKey] then", 1, true) ~= nil
         and src:find("it.sessTitle = t", 1, true) ~= nil)
   check("sessTitle: falls back to a short session id when a chat has no title yet",
         src:find("core.shortSessionId(it.session_id or it.key)", 1, true) ~= nil)

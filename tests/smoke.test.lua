@@ -124,6 +124,14 @@ for _, s in ipairs(jsCalls) do
 end
 if not sawUpdate then fail("refresh() never pushed a ccUpdate to the panel") end
 if not sawFixture then fail("the fixture session never reached the panel (per-tile loop didn't process it)") end
+-- project stacks (2026-09-10): the real tick stamps every session with its card; a
+-- lone session leads its own card (the stubbed hs.execute returns "", so the git probe
+-- misses safely and the session stacks by its folder).
+local sawLead = false
+for _, s in ipairs(jsCalls) do
+  if s:find("ccUpdate", 1, true) and s:find('"stackLead":true', 1, true) then sawLead = true end
+end
+if not sawLead then fail("the fixture session was never stamped as its project card's lead") end
 
 print("ok   - smoke: dashboard loads, first refresh() runs clean, fixture session renders")
 print("-- smoke.test.lua: 1 run, 0 failed --")

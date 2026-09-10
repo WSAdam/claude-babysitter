@@ -37,7 +37,10 @@ assert_eq 'esc() encodes "'  "yes" "$(has '.replace(/"/g,"&quot;")')"
 # positive. Add a NEW user-controlled string field here when you render one.
 # TODO(headless-js): replace this single-line source grep with the headless-JS twin harness
 # -- it cannot see a sink whose field and its esc() are split across lines.
-SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status)\b|\bg\b)"
+# 2026-09-10 (project stacks): branch names, the stack name/key, chat titles and worktree
+# paths are user-controlled too, and the Instances view builds its rows from `im.` (an
+# instance) and `iw.` (an idle worktree) -- every one of those fields must be esc()'d.
+SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot)\b|\b(im|iw)\.[A-Za-z]+\b|\bg\b)"
 raw_sinks="$(grep -nE "$SINK_RE" "$DASH" || true)"
 assert_eq "no user field concatenated RAW into panel HTML (must be esc()'d)" "" "$raw_sinks"
 
@@ -58,5 +61,10 @@ assert_eq "tile status label is esc()'d at the sink" "yes" "$(has 'var label = e
 tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "x.innerHTML='<b>'+it.group+'</b>';" >> "$tmp"
 planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
 assert_eq "deny-list grep fires on a planted raw sink (no vacuous pass)" "1" "$planted"
+tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "html += '<span>' + im.folder + '</span>';" >> "$tmp"
+planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
+assert_eq "deny-list grep fires on a planted raw Instances-row sink" "1" "$planted"
+assert_eq "the stack name reaches the card through esc()" "yes" "$(has 'esc(it.stackName)')"
+assert_eq "a branch reaches the card through esc()"       "yes" "$(has 'esc(it.branch)')"
 
 finish

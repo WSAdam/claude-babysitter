@@ -142,6 +142,40 @@ Claude Code hooks ──► cc-status.sh ──► ~/.claude/cc-status/<session_
   bootstrap: it reads the JSON files, renders tiles, writes a heartbeat, and wires
   the real effects (focus, keystrokes, Stream Deck) into cc-core.
 
+## Project cards & instances
+
+Built for the parallel-worktree workflow (one unit of work = one branch = one sibling
+worktree folder = one VS Code window = one Claude session): the grid shows **one card per
+project**, not one per session.
+
+- **What folds together.** A session launched at a git worktree top-level joins its repo's
+  card — the main checkout and every linked worktree (`../repo-fix-y`, or `canna-fresh` for
+  `Canna-better` — the names don't have to match; identity comes from git, one cached
+  `git rev-parse` per launch folder). Two sessions in one plain folder share a card too. A
+  folder nested inside a repo that isn't its own repo (a scratch folder) keeps its own card,
+  and A/B fork-to-compare variants keep theirs so the comparison stays visible.
+- **What the card shows.** The instance that most needs you — blocked longest first
+  (approval or question, then error, then stalled), then the newest *finished* one you haven't
+  jumped to yet, else the most recently active — with its branch chip and an
+  "also: 1 working · 1 idle" line for the rest. A stationary lead is held for 30s so two busy
+  instances don't swap the card every few seconds. The card is named after the main checkout
+  (its relabel, if any); **Relabel** on a card renames the whole repo.
+- **Double-click** a card to jump to that same instance. Once you've jumped to a finished
+  instance it stops outranking the others until it finishes again (remembered across reloads).
+- **The corner button** (top-right of every card) opens the **Instances view**: every
+  instance with its folder, branch, status, age and what it's waiting on — **Focus** or
+  **Details** (which opens that instance's detail panel) — plus hidden instances (**Unhide**)
+  and the repo's **worktrees with no session**, each with **Open** (its editor + Claude, via
+  the normal spawn path; only a worktree the repo itself lists can be opened). The button shows
+  the instance count, and a pulsing dot when *another* instance needs you. Right-click →
+  **Instances…** opens the same view.
+- The detail panel stays on the instance you selected even if the card starts showing a
+  different one (the card then gets a dashed outline), so a nudge never goes to the wrong
+  worktree. Search matches branches and chat titles too; bulk actions still act only on the
+  sessions the search matched. The lock screen draws one ring per project.
+- `stacks.enabled: false` in `~/.claude/cc-config.json` switches back to one card per session.
+  The Stream Deck stays one key per session.
+
 ## Control actions
 
 The **header** has **New** (opens the new-session modal — see "Spawn"), a **☕
@@ -149,12 +183,14 @@ keep-awake toggle** (see "Keep this Mac awake"), **📊 Fleet insights** and **�
 ledger** overlays (see "Audit log & insights"), the **⚙ Settings** panel, and a theme switcher.
 
 **Single-click** a tile to select it (opens the detail panel). **Double-click** a
-tile to **jump** straight to its window. Both are decided the moment the button goes
+tile to **jump** straight to its window — on a project card, to the instance that needs
+you most (see "Project cards & instances"). Both are decided the moment the button goes
 down, so they land even while a busy fleet is re-rendering the grid under the pointer.
 **Right-click** a tile for a context menu:
 
 - **Jump to window** — focus that session's editor window (the same as a double-click,
   offered here too).
+- **Instances…** — the project's Instances view (same as the card's corner button).
 - **Relabel…** — give the tile a custom display name (e.g. "auth refactor" instead
   of the folder name). Display-only — jumps still target the real window — and
   **persistent**: keyed by the session's **stable project identity** (its launch

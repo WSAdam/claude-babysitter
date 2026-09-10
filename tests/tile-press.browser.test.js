@@ -92,6 +92,15 @@ const update = fs.readFileSync(path.join(out, "update.js"), "utf8");
       try { const m = JSON.parse(s); return m.a === a && m.v === v; } catch (e) { return false; }
     }).length, [a, v]);
   }
+  // A jump on a tile: "focus" for a stackless tile, or (project stacks, 2026-09-10)
+  // "focus-group" for the card's stack -- Lua resolves the instance from fresh state.
+  async function jumps(key) {
+    const stack = await page.evaluate((k) => {
+      const el = document.querySelector('.tile[data-key="' + k + '"]');
+      return el ? el.getAttribute("data-stack") : null;
+    }, key);
+    return (await sent("focus", key)) + (stack ? await sent("focus-group", stack) : 0);
+  }
   async function reset() {
     await page.evaluate(() => { window.__sent = []; selectedKey = null; });
     await page.waitForTimeout(700);                // past the OS double-click interval
@@ -105,25 +114,25 @@ const update = fs.readFileSync(path.join(out, "update.js"), "utf8");
 
   await reset(); await at("k1");
   await press(1); await press(2);
-  eq("a plain double-click jumps exactly once", await sent("focus", "k1"), 1);
+  eq("a plain double-click jumps exactly once", await jumps("k1"), 1);
 
   await reset(); await at("k1");
   await press(1); await rebuild(); await press(2);
-  eq("a double-click still jumps when the grid re-renders between the presses", await sent("focus", "k1"), 1);
+  eq("a double-click still jumps when the grid re-renders between the presses", await jumps("k1"), 1);
 
   await reset(); await at("k1");
   await press(1); await press(2, true);
-  eq("a double-click jumps even when the grid re-renders during the second press", await sent("focus", "k1"), 1);
+  eq("a double-click jumps even when the grid re-renders during the second press", await jumps("k1"), 1);
 
   await reset(); await at("k2");
   await press(1, true);
   eq("a single click selects even when the grid re-renders during the press",
      await page.evaluate(() => selectedKey), "k2");
-  eq("a single click never jumps", await sent("focus", "k2"), 0);
+  eq("a single click never jumps", await jumps("k2"), 0);
 
   await reset(); await at("k3");
   await press(1); await press(2); await press(3);
-  eq("a triple-click jumps once, not twice", await sent("focus", "k3"), 1);
+  eq("a triple-click jumps once, not twice", await jumps("k3"), 1);
 
   await browser.close();
   finish();

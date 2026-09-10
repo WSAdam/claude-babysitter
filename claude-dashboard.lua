@@ -3336,6 +3336,181 @@ function spawnPrompt()
   FX.spawnSession(editor, project, task)
 end
 
+-- ---- Project stacks (2026-09-10): one card per project ------------------------
+-- A repo's main checkout + its sibling worktrees (or 2+ sessions in one folder) fold
+-- into one card; the pure logic is core.applyStackIdentity / stackInstances /
+-- rankInstances. Everything here hangs off FX (the main chunk is at Lua's 200-local cap).
+
+-- One `git rev-parse` per distinct LAUNCH folder, cached for the panel's life (a folder's
+-- worktree membership doesn't change); a miss retries after 60s, so a folder that becomes
+-- a repo is picked up. Synchronous like FX.gitRoot -- steady state never shells out.
+function FX.repoIdentity(dir)
+  if type(dir) ~= "string" or dir == "" then return nil end
+  FX._repoIdent = FX._repoIdent or {}
+  local c, now = FX._repoIdent[dir], FX.now()
+  if c and (c.ident or (now - c.at) < 60) then return c.ident end
+  local ident
+  pcall(function() ident = core.parseRepoIdentity(hs.execute(core.gitIdentityCmd(dir))) end)
+  FX._repoIdent[dir] = { ident = ident, at = now }
+  return ident
+end
+
+-- The branch, from <git-dir>/HEAD (one tiny read), at most every 5s -- a checkout in a
+-- worktree shows on its card within seconds without a git process per tick.
+function FX.headFor(gitDir)
+  if type(gitDir) ~= "string" or gitDir == "" then return nil end
+  FX._headCache = FX._headCache or {}
+  local c, now = FX._headCache[gitDir], FX.now()
+  if c and (now - c.at) < 5 then return c.head end
+  local head = core.parseHeadRef(FX.readFile(gitDir .. "/HEAD"))
+  FX._headCache[gitDir] = { head = head, at = now }
+  return head
+end
+
+-- Stamp every session in the tick's list (hidden ones included) with its stack identity.
+-- Runs after relabels, so a repo card takes its main checkout's relabel. stacks.enabled
+-- = false strips the stack fields: the panel falls back to one card per session.
+function FX.annotateStacks(list, labels, cfg)
+  if core.config(cfg, "stacks.enabled", true) == false then
+    for _, it in ipairs(list or {}) do it.stackKey = nil; it.stackName = nil end
+    return
+  end
+  FX._launchDir = FX._launchDir or {}
+  FX._launchDirN = FX._launchDirN or 0
+  if FX._launchDirN > 500 then FX._launchDir, FX._launchDirN = {}, 0 end  -- bounded: cwd drift adds keys
+  for _, it in ipairs(list or {}) do
+    local launch, ident, head
+    if not it.remote then
+      local lk = tostring(it.projectKey or "") .. "|" .. tostring(it.cwd or "")
+      launch = FX._launchDir[lk]
+      if launch == nil then
+        launch = core.launchDirFor(it.projectKey, it.cwd) or false
+        FX._launchDir[lk] = launch
+        FX._launchDirN = FX._launchDirN + 1
+      end
+      if launch then
+        ident = FX.repoIdentity(launch)
+        if ident and ident.toplevel == launch then head = FX.headFor(ident.gitDir) end
+      end
+    end
+    core.applyStackIdentity(it, launch or nil, ident, head, labels)
+  end
+end
+
+-- When did a jump last LAND on each session (core.handleAction calls fx.markSeen)? A
+-- finished instance leads its card only until you've jumped to it (core.instanceTier).
+-- hs.settings, so a deploy/reload doesn't re-promote every finished session; entries
+-- older than 7 days are dropped on write.
+function FX.seenAt()
+  if FX._seen == nil then
+    local s = hs.settings.get("ccSeenAt")
+    FX._seen = type(s) == "table" and s or {}
+  end
+  return FX._seen
+end
+function FX.markSeen(key)
+  if type(key) ~= "string" or key == "" then return end
+  local s, now = FX.seenAt(), FX.now()
+  s[key] = now
+  for k, t in pairs(s) do
+    if type(t) ~= "number" or now - t > 7 * 86400 then s[k] = nil end
+  end
+  pcall(function() hs.settings.set("ccSeenAt", s) end)
+end
+-- First run of the feature: everything ALREADY finished counts as seen, so the rollout
+-- doesn't promote yesterday's finished sessions over the one you're working in.
+function FX.seedSeen(list)
+  if hs.settings.get("ccSeenAtSeeded") then return end
+  local s, now = FX.seenAt(), FX.now()
+  for _, it in ipairs(list or {}) do
+    if it.status == "done" and type(it.key) == "string" then s[it.key] = now end
+  end
+  pcall(function() hs.settings.set("ccSeenAt", s); hs.settings.set("ccSeenAtSeeded", true) end)
+end
+
+-- The repo's worktrees (`git worktree list --porcelain`, parsed by core), or {} + an error.
+function FX.repoWorktrees(commonDir)
+  local out, err
+  local ok = pcall(function()
+    local q = "'" .. tostring(commonDir or ""):gsub("'", "'\\''") .. "'"
+    local raw = hs.execute("git --git-dir=" .. q .. " worktree list --porcelain 2>/dev/null")
+    if type(raw) == "string" and raw ~= "" then out = core.parseWorktreePorcelain(raw) end
+  end)
+  if not ok or not out then err = "couldn't list this repo's worktrees" end
+  return out or {}, err
+end
+
+-- The open Instances view (FX._instancesView = {stackKey,...}): its members (visible and
+-- hidden) plus the repo's worktrees with no session, pushed only when the JSON changed.
+-- The tick calls this while the panel is visible; opening the view forces one push.
+-- Worktrees are re-listed on open, after an Open, and at most every 15s.
+function FX.pushInstances(force)
+  local v = FX._instancesView
+  if type(v) ~= "table" or v.stackKey == "" then return end
+  local shown, hidden, any = {}, {}, nil
+  for _, it in ipairs(FX._shownItems or {}) do
+    if it.stackKey == v.stackKey then shown[#shown + 1] = it; any = any or it end
+  end
+  for _, it in ipairs(FX._hiddenItems or {}) do
+    if it.stackKey == v.stackKey then hidden[#hidden + 1] = it; any = any or it end
+  end
+  local now = FX.now()
+  if any then v.stackName, v.repoKey, v.mainRoot = any.stackName, any.repoKey, any.mainRoot end
+  if v.repoKey and (force or v.wt == nil or (now - (v.wtAt or 0)) >= 15) then
+    v.wt, v.listError = FX.repoWorktrees(v.repoKey)
+    v.wtAt = now
+  end
+  local p = core.instancesPayload(v.stackKey, shown, hidden, v.wt or {}, {
+    stackName = v.stackName, repoKey = v.repoKey, mainRoot = v.mainRoot,
+    pending = FX._openingWt, listError = v.listError })
+  local js = hs.json.encode(p)
+  if force or js ~= v.json then
+    v.json = js
+    pcall(function() wv:evaluateJavaScript("window.ccInstances(" .. js .. ")") end)
+  end
+end
+
+-- "Open" on an idle worktree row. The path is only ever used if the repo ITSELF lists it
+-- (core.openWorktreeVerdict), so a crafted webview message can't spawn anywhere else.
+-- Spawns like FX.abLaunch does (isNew: the cold-start window wait, which only accepts the
+-- worktree's own window); honours spawn.live (a dry run arms no pending guard).
+function FX.openWorktree(stackKey, path)
+  local any
+  for _, it in ipairs(lastRenderList or {}) do
+    if it.stackKey == stackKey and it.repoKey then any = it; break end
+  end
+  if not any then
+    print("[cc-dashboard] open-worktree: no repo behind stack " .. tostring(stackKey))
+    return
+  end
+  local wts = FX.repoWorktrees(any.repoKey)
+  local live = {}
+  for _, it in ipairs(lastRenderList or {}) do          -- hidden sessions included
+    if it.repoKey == any.repoKey and it.wtRoot then live[core.normDir(it.wtRoot)] = true end
+  end
+  FX._openingWt = FX._openingWt or {}
+  local now = FX.now()
+  for p, t in pairs(FX._openingWt) do if now - t > 90 then FX._openingWt[p] = nil end end
+  local target = core.normDir(tostring(path or ""))
+  local ok, why = core.openWorktreeVerdict(wts, target, live, {
+    exists = function(p) return hs.fs.attributes(p, "mode") == "directory" end,
+    pending = FX._openingWt })
+  if not ok then
+    print("[cc-dashboard] open-worktree refused (" .. tostring(why) .. "): " .. target)
+    hs.alert.show("Can't open that worktree: " .. tostring(why))
+    return
+  end
+  local cfg = loadConfig()
+  local editor = any.editor
+  if editor ~= "vscode" and editor ~= "cursor" and editor ~= "kitty" and editor ~= "terminal" then
+    editor = core.config(cfg, "spawn.editor", "vscode")
+  end
+  print("[cc-dashboard] open-worktree: " .. target .. " in " .. tostring(editor))
+  local launched = FX.spawnSession(editor, target, nil, nil, nil, nil, true)
+  if launched then FX._openingWt[target] = now end
+  FX.pushInstances(true)
+end
+
 -- ---- DR7: A/B fork-to-compare (explicitly-invoked, operator-aware) ------------
 -- Registry of active cohorts (cc-ab.json). AB_FILE lives in this do-block so it is an
 -- FX upvalue, not a main-chunk local (the file is at Lua's 200-local cap).
@@ -4848,6 +5023,47 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("window.ccDoctor(" .. hs.json.encode(FX.doctorStatus()) .. ")") end)
     return
   end
+  -- ---- Project stacks: v is a STACK key here, not a session key -------------------
+  if a == "focus-group" then
+    -- Double-click on a project card: jump to the instance that needs you most, picked
+    -- from FRESH state among the card's visible members (text = their keys, so a search
+    -- that narrowed the card also narrows the jump). Serialized like every jump path.
+    local sk = tostring(payload.v or "")
+    local want
+    local okd, keys = pcall(function() return hs.json.decode(tostring(payload.text or "")) end)
+    if okd and type(keys) == "table" and #keys > 0 then
+      want = {}
+      for _, k in ipairs(keys) do want[tostring(k)] = true end
+    end
+    local hiddenNow = FX.loadHidden()
+    local members = {}
+    for _, it in ipairs(lastRenderList or {}) do
+      if it.stackKey == sk and not hiddenNow[it.key] and (not want or want[it.key]) then
+        members[#members + 1] = it
+      end
+    end
+    local lead = core.rankInstances(members, FX.seenAt(), (FX._stackLeads or {})[sk])[1]
+    if not lead then
+      print("[cc-dashboard] focus-group: no live instance on card " .. sk)
+      return
+    end
+    print("[cc-dashboard] focus-group " .. sk .. " -> " .. tostring(lead.key) .. " (" .. tostring(lead.status) .. ")")
+    dispatchSerialized(lead, "focus", function() core.handleAction(FX, lead, "focus") end)
+    return
+  end
+  if a == "open-instances" then
+    FX._instancesView = { stackKey = tostring(payload.v or "") }
+    FX.pushInstances(true)
+    return
+  end
+  if a == "close-instances" then
+    FX._instancesView = nil
+    return
+  end
+  if a == "open-worktree" then
+    FX.openWorktree(tostring(payload.v or ""), tostring(payload.text or ""))
+    return
+  end
   if a == "open-hidden-view" then
     -- The restore list. Sends only what the row needs to identify a session --
     -- never a prompt body (the panel's audit view owns content, this doesn't).
@@ -5775,6 +5991,16 @@ local function handleBridgeMsg(msg)
             refresh()
           end },
       }
+      -- Project stacks: every instance of this card's project + its idle worktrees. The
+      -- same view as the card's corner button, but a native menu click is reliable on
+      -- this non-activating panel (an in-webview button's first click can just activate
+      -- the window).
+      if item.stackKey then
+        local n = tonumber(item.stackSize) or 1
+        table.insert(menu, 2, { title = (n > 1) and ("Instances (" .. n .. ")…") or "Instances…", fn = function()
+            pcall(function() wv:evaluateJavaScript("openInstancesFor(" .. jsString(item.stackKey) .. ")") end)
+          end })
+      end
       -- Drain (Feature F): finish the in-flight turn, then close. While working/
       -- waiting, arm the in-memory flag; if already idle/done there's no turn to
       -- finish, so close now. Only shown when drain.enabled.
@@ -5827,8 +6053,12 @@ local function handleBridgeMsg(msg)
     -- folder), not the live cwd which drifts as the agent cd's around (that drift
     -- was why relabels didn't stick). Blank or == the real folder name clears it.
     -- Survives close/reopen/new-instance/reload (F1).
-    local lkey = item.projectKey or item.cwd
-    labels = core.setLabel(labels, lkey, payload.text, item.name)
+    -- Project stacks: a repo card's name belongs to the whole repo -- keyed by the
+    -- main checkout's projectKey (core.stackLabelKey), which the card's stackName
+    -- reads -- so renaming while a worktree leads the card still renames the card.
+    local lkey = core.stackLabelKey(item) or item.projectKey or item.cwd
+    local fallbackName = (item.mainRoot and item.mainRoot:match("([^/]+)$")) or item.name
+    labels = core.setLabel(labels, lkey, payload.text, fallbackName)
     FX.saveLabels(labels)
     ledgerFor(item, { type = "relabel", to = labels[lkey] or "" })
     print("[cc-dashboard] relabel " .. tostring(lkey) .. " -> " .. tostring(labels[lkey]))
@@ -6714,6 +6944,29 @@ local HTML = [[
   .theme-dots .label, .theme-dots .meta { display:none; }
   .theme-dots .s-approval .dot, .theme-dots .s-error .dot { animation:pulse 1s infinite; }
 
+  /* PROJECT STACKS: a card's corner button, branch chip and "also" line ----- */
+  .stk-btn { position:absolute; top:6px; right:6px; z-index:1; display:inline-flex; align-items:center; gap:3px;
+             height:18px; min-width:18px; padding:0 5px; box-sizing:border-box; border-radius:9px; cursor:pointer;
+             border:1px solid var(--border); background:var(--surface-2); color:var(--muted);
+             font-family:inherit; font-size:10px; font-weight:600; line-height:1; font-variant-numeric:tabular-nums; }
+  .stk-btn:hover { color:var(--text-strong); border-color:var(--accent); }
+  .stk-btn.multi { color:var(--text-2); }
+  .stk-btn svg { display:block; }
+  .stk-btn .stk-dot { width:6px; height:6px; border-radius:50%; background:var(--st-approval); animation:pulse 1s infinite; }
+  .theme-cards .name, .theme-contrast .name { padding-right:26px; }   /* the name stays clear of the button */
+  .theme-contrast .stk-btn { top:9px; right:9px; }
+  .theme-bar .stk-btn, .theme-dots .stk-btn { position:static; margin-left:auto; flex:0 0 auto; height:16px; min-width:16px; }
+  .theme-bar .name, .theme-dots .name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .theme-bar .stk-btn:not(.multi):not(.needs), .theme-dots .stk-btn:not(.multi):not(.needs) { opacity:.55; }
+  .theme-cards .tile:has(.stk-btn:active) { transform:none; }         /* pressing the button doesn't press the card */
+  .tile.sel.sel-other { outline-style:dashed; }                       /* the card holds the selected instance, but draws another */
+  .stk-br { display:inline-block; max-width:9em; vertical-align:bottom; margin-left:5px; padding:0 5px; font-size:10px;
+            color:var(--text-3); border:1px solid var(--border); border-radius:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .stk-also { grid-column:1 / -1; font-size:11px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .theme-contrast .stk-also { grid-column:2; }
+  .theme-bar .stk-also, .theme-dots .stk-also { display:none; }
+  #d-wt { margin-left:6px; font-size:11px; color:var(--text-3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:12em; display:inline-block; vertical-align:bottom; }
+
   /* detail / control panel (shared across themes) ------------------------- */
   #detail { border-top:1px solid var(--border); padding:10px 12px; display:none; }
   #detail.show { display:block; }
@@ -7069,6 +7322,38 @@ local HTML = [[
 #doctor .ov-head, #features .ov-head, #cost .ov-head, #hiddenview .ov-head{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
 #doctor .ov-body, #features .ov-body, #cost .ov-body, #hiddenview .ov-body{ flex:1; overflow-y:auto; padding:14px 16px; }
 #doctor .ov-foot, #features .ov-foot, #cost .ov-foot, #hiddenview .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); display:flex; gap:12px; align-items:center; color:var(--dim); font-size:11px; }
+/* Project stacks: the Instances view -- a card over a backdrop (click outside or Esc
+   closes it), compact enough for the 580x320 panel. Its own classes throughout: the
+   themes style .s-* / .dot unscoped, which would pulse whole rows. */
+#instances{ position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:12; display:none; align-items:stretch; justify-content:center; padding:6px; font-size:12px; }
+#instances.show{ display:flex; }
+#inst-card{ width:100%; max-width:640px; display:flex; flex-direction:column; min-height:0; background:var(--bg-overlay); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+#instances .ov-head{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 12px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
+#inst-title{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#instances .ov-body{ flex:1; min-height:0; overflow-y:auto; padding:4px 8px 8px; }
+#instances .ov-foot{ padding:6px 12px; border-top:1px solid var(--border); color:var(--dim); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.in-sec{ margin:8px 4px 2px; font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim); }
+.in-row{ display:flex; align-items:center; gap:8px; padding:6px; border-radius:6px; }
+.in-row + .in-row{ border-top:1px solid var(--border); }
+.in-row.needs{ box-shadow:inset 3px 0 0 var(--st-approval); }
+.in-row.hid{ opacity:.6; }
+.in-dot{ width:8px; height:8px; border-radius:50%; flex:0 0 auto; background:var(--st-idle); }
+.in-dot.in-st-working{ background:var(--st-working); }
+.in-dot.in-st-done{ background:var(--st-done); }
+.in-dot.in-st-error{ background:var(--st-error); }
+.in-dot.in-st-approval{ background:var(--st-approval); animation:pulse 1s infinite; }
+.in-dot.in-st-none{ background:transparent; border:1px dashed var(--dim); box-sizing:border-box; }
+.in-main{ flex:1; min-width:0; }
+.in-name{ display:flex; gap:6px; align-items:baseline; min-width:0; }
+.in-folder{ font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.in-br{ font-size:10px; color:var(--text-3); border:1px solid var(--border); border-radius:6px; padding:0 5px; white-space:nowrap; max-width:11em; overflow:hidden; text-overflow:ellipsis; }
+.in-tag{ font-size:10px; color:var(--dim); white-space:nowrap; }
+.in-sub{ font-size:11px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.in-acts{ display:flex; gap:4px; flex:0 0 auto; }
+.in-btn{ font-family:inherit; font-size:11px; padding:2px 8px; border-radius:6px; border:1px solid var(--border); background:var(--surface-2); color:var(--text-2); cursor:pointer; }
+.in-btn:hover{ border-color:var(--accent); color:var(--text-strong); }
+.in-btn:disabled{ opacity:.5; cursor:default; }
+.in-empty{ padding:12px 6px; color:var(--dim); }
 /* Hidden-sessions rows: name + path, live status chip, and the way back */
 .hv-row{ display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border-weak); }
 .hv-main{ flex:1; min-width:0; }
@@ -7468,6 +7753,7 @@ local HTML = [[
     <div id="d-head">
       <span id="d-dot"></span>
       <span id="d-name"></span>
+      <span id="d-wt"></span>
       <span id="d-status"></span>
     </div>
     <!-- L5 tab strip: groups the views Shepherd already renders. The bar is
@@ -7954,6 +8240,16 @@ local HTML = [[
     <div class="ov-foot">
       <span>Hidden sessions keep running — they are only kept off the grid.</span>
       <button class="hv-all" onclick="unhideAll()">Restore all</button>
+    </div>
+  </div>
+
+  <!-- Project stacks: every instance of one project card, plus the repo's worktrees
+       with no session (Open). Filled by window.ccInstances; rows use data-inact. -->
+  <div id="instances" onclick="instBackdrop(event)">
+    <div id="inst-card" role="dialog" aria-label="Instances">
+      <div class="ov-head"><span id="inst-title">Instances</span><button class="s-x" onclick="closeInstances()" title="Close (Esc)">✕</button></div>
+      <div class="ov-body" id="inst-body"></div>
+      <div class="ov-foot"><span id="inst-foot"></span></div>
     </div>
   </div>
 
@@ -8598,7 +8894,8 @@ local HTML = [[
       hideBars();
       renameKey = key;
       var inp = document.getElementById("renamebar-input");
-      inp.value = it.label || it.name || "";
+      // a repo card's name belongs to the whole repo (Lua keys it on the main checkout)
+      inp.value = (it.repoKey && it.stackName) || it.label || it.name || "";
       document.getElementById("renamebar").classList.add("show");
       inp.focus(); inp.select();
     }
@@ -8710,7 +9007,7 @@ local HTML = [[
     function tileMatches(it, toks){
       if(!toks.length) return true;
       var hay = [it.label||"", it.name||"", it.cwd||"", it.projectKey||"",
-                 it.status||"", it.group||""].join(" ").toLowerCase();
+                 it.status||"", it.group||"", it.branch||"", it.sessTitle||"", it.stackName||""].join(" ").toLowerCase();
       for(var i=0;i<toks.length;i++){ if(hay.indexOf(toks[i]) < 0) return false; }
       return true;
     }
@@ -10993,8 +11290,17 @@ local HTML = [[
       });
     }
     function paintSelection(){
-      var tiles = document.querySelectorAll(".tile");
-      tiles.forEach(function(t){ t.classList.toggle("sel", t.dataset.key === selectedKey); });
+      // Project stacks: selection stays on the SESSION (so a lead change can never
+      // retarget a half-typed nudge); a card lights up when it holds that session, and
+      // shows a dashed outline while it draws a different instance.
+      var sel = selectedKey ? findItem(selectedKey) : null;
+      var sk = (sel && sel.stackKey) || null;
+      document.querySelectorAll("#grid .tile").forEach(function(t){
+        var mine = t.dataset.key === selectedKey;
+        var on = mine || (!!sk && t.getAttribute("data-stack") === sk);
+        t.classList.toggle("sel", on);
+        t.classList.toggle("sel-other", on && !mine);
+      });
     }
 
     function onEffortChange(){
@@ -11142,6 +11448,14 @@ local HTML = [[
       document.getElementById("d-dot").style.setProperty("--dc", COLORS[est] || "var(--st-idle)");
       document.getElementById("d-dot").style.background = COLORS[est] || "var(--st-idle)";
       document.getElementById("d-name").textContent = it.label || it.name || "?";
+      // which worktree/branch a nudge from this panel goes to (only when it tells
+      // instances apart: a multi-instance card, or a linked worktree)
+      var dwt = document.getElementById("d-wt");
+      if(dwt){
+        var showWt = !!(it.branch && ((it.stackSize|0) > 1 || it.isMainWt === false));
+        dwt.textContent = showWt ? "⎇ " + it.branch : "";
+        dwt.style.display = showWt ? "" : "none";
+      }
       document.getElementById("d-status").textContent =
         statusWords(it) + (it.since ? " - " + fmtAge(it.since) : "") + (it.stale && !bgRunning(it) ? " - stale" : "");
       var pend = document.getElementById("d-pending");
@@ -11327,6 +11641,146 @@ local HTML = [[
       }
       body.innerHTML = html;
     };
+    // ---- Project stacks: the Instances view (every instance of one card) ------------
+    // Lua pushes window.ccInstances({stackKey, stackName, members, worktrees, ...}) on
+    // open and whenever it changes while open. Rows arrive in a stable order (main
+    // checkout first, then folder) so a live re-render never moves a row under the
+    // pointer; a re-render also waits for an in-progress press to finish; and keys ride
+    // data attributes read by one delegated listener, never interpolated into a handler.
+    var INST = { stackKey: null, data: null, sig: null, opening: {}, deferred: false, pressing: false };
+    function openInstancesFor(sk){
+      if(!sk) return;
+      INST = { stackKey: sk, data: null, sig: null, opening: {}, deferred: false, pressing: false };
+      document.getElementById("inst-title").textContent = "Instances";
+      document.getElementById("inst-foot").textContent = "";
+      document.getElementById("inst-body").innerHTML = '<div class="in-empty">Loading…</div>';
+      document.getElementById("instances").classList.add("show");
+      send("open-instances", sk);
+    }
+    function closeInstances(){
+      var ov = document.getElementById("instances");
+      if(!ov || !ov.classList.contains("show")) return;
+      ov.classList.remove("show");
+      INST = { stackKey: null, data: null, sig: null, opening: {}, deferred: false, pressing: false };
+      send("close-instances");
+    }
+    function instBackdrop(e){ if(e && e.target && e.target.id === "instances") closeInstances(); }
+    window.ccInstances = function(p){
+      var ov = document.getElementById("instances");
+      if(!ov || !ov.classList.contains("show")) return;               // closed: a late reply is dropped
+      if(!p || !INST.stackKey || p.stackKey !== INST.stackKey) return; // a reply for a card we left
+      INST.data = p;
+      renderInstances(false);
+    };
+    function instList(v){ return Array.isArray(v) ? v : []; }     // hs.json encodes an empty list as {}
+    function instStatusWord(im){
+      var w = im.hung ? "Stalled"
+            : (im.bgActive && (im.status === "done" || im.status === "idle")) ? "Running agents"
+            : (LABELS[im.status] || "Idle");
+      return (im.hidden ? "Hidden · " : "") + w + (im.stale ? " (quiet)" : "");
+    }
+    function renderInstances(force){
+      var p = INST.data, body = document.getElementById("inst-body");
+      if(!p || !body) return;
+      if(INST.pressing){ INST.deferred = true; return; }     // never swap a row out mid-click
+      var now = Date.now();
+      var members = instList(p.members), worktrees = instList(p.worktrees);
+      // an Open stops reading "Opening…" once its session shows up (or after 20s)
+      var roots = {};
+      members.forEach(function(im){ if(im.wtRoot) roots[im.wtRoot] = true; });
+      Object.keys(INST.opening).forEach(function(path){
+        if(roots[path] || now - INST.opening[path] > 20000) delete INST.opening[path];
+      });
+      var sig = tileSignature(p) + "|" + Object.keys(INST.opening).sort().join(",");
+      if(!force && sig === INST.sig){ instAges(); return; }
+      INST.sig = sig;
+      document.getElementById("inst-title").textContent = (p.stackName || "Project") + " — instances";
+      document.getElementById("inst-foot").textContent = p.mainRoot || "";
+      var html = "";
+      if(p.gone || members.length === 0){
+        html += '<div class="in-empty">No sessions are running in this project any more.</div>';
+      }
+      for(var i=0;i<members.length;i++){
+        var im = members[i];
+        var st = /^[a-z]+$/.test(im.status || "") ? im.status : "idle";
+        var needs = st === "approval" || st === "error" || !!im.hung;
+        var sub = im.pendingSummary ? "wants: " + im.pendingSummary : (im.sessTitle || "");
+        html += '<div class="in-row' + (needs ? ' needs' : '') + (im.hidden ? ' hid' : '') + '">'
+             +   '<span class="in-dot in-st-' + st + '"></span>'
+             +   '<div class="in-main">'
+             +     '<div class="in-name"><span class="in-folder">' + esc(im.folder || im.key) + '</span>'
+             +       (im.branch ? '<span class="in-br">⎇ ' + esc(im.branch) + '</span>' : '')
+             +       (im.isMainWt ? '<span class="in-tag">main</span>' : '')
+             +       (im.lead ? '<span class="in-tag">· on the card</span>' : '')
+             +     '</div>'
+             +     '<div class="in-sub">' + esc(instStatusWord(im))
+             +       (im.since ? ' · <span class="in-age" data-since="' + esc(im.since) + '">' + esc(fmtAge(im.since)) + '</span>' : '')
+             +       (sub ? ' · ' + esc(sub) : '') + '</div>'
+             +   '</div>'
+             +   '<div class="in-acts">'
+             +     (im.hidden
+                     ? '<button class="in-btn" data-inact="unhide" data-k="' + esc(im.key) + '">Unhide</button>'
+                     : '<button class="in-btn" data-inact="focus" data-k="' + esc(im.key) + '">Focus</button>'
+                       + '<button class="in-btn" data-inact="details" data-k="' + esc(im.key) + '">Details</button>')
+             +   '</div>'
+             + '</div>';
+      }
+      if(worktrees.length){
+        html += '<div class="in-sec">Worktrees with no session</div>';
+        for(var j=0;j<worktrees.length;j++){
+          var iw = worktrees[j];
+          var busy = !!(INST.opening[iw.path] || iw.pending);
+          html += '<div class="in-row">'
+               +   '<span class="in-dot in-st-none"></span>'
+               +   '<div class="in-main">'
+               +     '<div class="in-name"><span class="in-folder">' + esc(iw.folder || iw.path) + '</span>'
+               +       (iw.branch ? '<span class="in-br">⎇ ' + esc(iw.branch) + '</span>' : '')
+               +       (iw.isMain ? '<span class="in-tag">main</span>' : '')
+               +     '</div>'
+               +     '<div class="in-sub">' + esc(iw.path) + '</div>'
+               +   '</div>'
+               +   '<div class="in-acts"><button class="in-btn" data-inact="open" data-k="' + esc(iw.path) + '"'
+               +     (busy ? ' disabled' : '') + '>' + (busy ? 'Opening…' : 'Open') + '</button></div>'
+               + '</div>';
+        }
+      }
+      if(p.listError){ html += '<div class="in-empty">' + esc(p.listError) + '</div>'; }
+      var y = body.scrollTop;
+      body.innerHTML = html;
+      body.scrollTop = y;
+    }
+    function instAges(){
+      document.querySelectorAll("#inst-body .in-age").forEach(function(s){
+        var since = +s.getAttribute("data-since");
+        var age = since ? fmtAge(since) : "";
+        if(s.textContent !== age) s.textContent = age;
+      });
+    }
+    (function(){
+      var body = document.getElementById("inst-body");
+      if(!body) return;
+      body.addEventListener("mousedown", function(){ INST.pressing = true; });
+      document.addEventListener("mouseup", function(){
+        if(!INST.pressing) return;
+        INST.pressing = false;
+        if(INST.deferred){ INST.deferred = false; setTimeout(function(){ renderInstances(true); }, 0); }
+      });
+      body.addEventListener("click", function(e){
+        var b = e.target && e.target.closest ? e.target.closest("[data-inact]") : null;
+        if(!b || b.disabled) return;
+        var act = b.getAttribute("data-inact"), k = b.getAttribute("data-k");
+        if(!k) return;
+        if(act === "focus"){ send("focus", k); closeInstances(); }
+        else if(act === "details"){ closeInstances(); selectTile(k); }
+        else if(act === "unhide"){ send("unhide-tile", k); }
+        else if(act === "open"){ INST.opening[k] = Date.now(); send("open-worktree", INST.stackKey, k); renderInstances(true); }
+      });
+      document.addEventListener("keydown", function(e){
+        if(e.key !== "Escape") return;
+        var ov = document.getElementById("instances");
+        if(ov && ov.classList.contains("show")) closeInstances();
+      });
+    })();
     // ---- F9: Features list overlay (plain-language what + why per feature) ----
     function openFeatures(){ send("open-features-view"); document.getElementById("features").classList.add("show"); }
     function closeFeatures(){ document.getElementById("features").classList.remove("show"); }
@@ -13171,16 +13625,61 @@ local HTML = [[
       var cls = "tile s-" + stCls + (it.stale && !bgRunning(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
       // select + double-click jump are decided at mousedown by onGridMouseDown (below):
       // a grid rebuild mid-press detaches the tile, so inline click handlers were lost
-      return '<div class="'+cls+'" data-key="'+esc(it.key)+'" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
+      // data-stack: this card's project stack (focus-group + the Instances button read it)
+      return '<div class="'+cls+'" data-key="'+esc(it.key)+'"'+(it.stackKey ? ' data-stack="'+esc(it.stackKey)+'"' : '')+' oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump to the instance that needs you · right-click for more">'
            + '<span class="dot"></span>'
-           + '<span class="name">'+esc(it.label || it.autoTitle || it.name)+(it.group ? ' <span class="gtag">🏷 '+esc(it.group)+'</span>' : '')+'</span>'
-           + '<span class="label">'+(age ? '<span class="age">'+esc(age)+'</span> ' : '')+label+'</span>'
+           + '<span class="name">'+(it.stackName ? esc(it.stackName) : esc(it.label || it.autoTitle || it.name))+(it.group ? ' <span class="gtag">🏷 '+esc(it.group)+'</span>' : '')+'</span>'
+           + '<span class="label">'+(age ? '<span class="age">'+esc(age)+'</span> ' : '')+label+stackBranchChip(it)+'</span>'
            + riskBadge(it)
            + prBadgeHtml(it)
            + bgBadge(it)
            + (meta ? '<span class="meta">'+esc(meta)+'</span>' : '')
+           + stackAlsoHtml(it)
            + ctxBarHtml(it)
+           + stackBtnHtml(it)
            + '</div>';
+    }
+    // ---- Project stacks: the card's extras ----------------------------------------
+    // Branch chip only where it tells instances apart (a multi-instance card, or a lone
+    // linked worktree); a solo main-checkout card looks exactly as before.
+    function stackBranchChip(it){
+      if(!it.branch || !((it.stackSize|0) > 1 || it.isMainWt === false)) return "";
+      var tip = it.detached ? "Detached at " + it.branch : "Branch " + it.branch;
+      return ' <span class="stk-br" title="'+esc(tip)+'">⎇ '+esc(it.branch)+'</span>';
+    }
+    // "also: 1 working · 1 idle" -- the card's OTHER instances (Lua's it.stackAlso).
+    var STACK_WORDS = { approval:"needing you", error:"errored", hung:"stalled", ready:"ready for you",
+                        working:"working", done:"done", idle:"idle" };
+    function stackAlsoHtml(it){
+      var a = Array.isArray(it.stackAlso) ? it.stackAlso : [];
+      var parts = [];
+      for(var i=0;i<a.length;i++){
+        var e = a[i];
+        if(e && e.n > 0) parts.push(e.n + " " + (STACK_WORDS[e.b] || "other"));
+      }
+      return parts.length ? '<span class="stk-also">'+esc("also: " + parts.join(" · "))+'</span>' : "";
+    }
+    // The top-right corner button on every (local) card: opens the Instances view. Shows
+    // the instance count when there's more than one, and a pulsing dot when ANOTHER
+    // instance needs you. data-nodbl: its presses never select the card or pair into a
+    // double-click; the key is read from the card's data-stack, never interpolated.
+    var STACK_ICON = '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true">'
+      + '<rect x="1.5" y="4.5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/>'
+      + '<path d="M5 2.5h7a1.5 1.5 0 0 1 1.5 1.5v7" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+    function stackBtnHtml(it){
+      if(!it.stackKey || String(it.stackKey).indexOf("remote:") === 0) return "";   // bridge tiles: no instances view
+      var n = it.stackSize|0, needs = it.stackNeeds|0, hid = it.stackHidden|0;
+      var tip = "Instances" + (n > 1 ? " — " + n + " running" : "") + (hid > 0 ? " (+" + hid + " hidden)" : "")
+              + (needs > 0 ? " · " + needs + " more need" + (needs === 1 ? "s" : "") + " you" : "");
+      return '<button type="button" class="stk-btn'+(n > 1 ? " multi" : "")+(needs > 0 ? " needs" : "")+'" data-nodbl'
+           + ' title="'+esc(tip)+'" aria-label="'+esc(tip)+'" onclick="openInstances(event)">'
+           + (n > 1 ? '<span class="stk-n">'+n+'</span>' : STACK_ICON) + (needs > 0 ? '<i class="stk-dot"></i>' : '') + '</button>';
+    }
+    function openInstances(ev){
+      if(ev){ ev.stopPropagation(); }
+      var tile = ev && ev.target && ev.target.closest ? ev.target.closest(".tile") : null;
+      var sk = tile && tile.getAttribute("data-stack");
+      if(sk) openInstancesFor(sk);
     }
     // DR2: green pill while background work runs (delegated subagents or a Workflow
     // fleet). Count from the server-side subagents/ mtime scan (it.bg_count).
@@ -13243,14 +13742,22 @@ local HTML = [[
       if(!tile) return;
       var key = tile.getAttribute("data-key");
       if(!key) return;
+      // a project card pairs on its STACK, so a lead change between the two presses
+      // (a different instance drawn) is still one double-click on the same card
+      var stack = tile.getAttribute("data-stack");
       var nodbl = !!(el.closest && el.closest("[data-nodbl]"));
-      var r = tileDblStep(tileDblState, key, Date.now(), e.detail, nodbl);
+      var r = tileDblStep(tileDblState, stack || key, Date.now(), e.detail, nodbl);
       tileDblState = r[1];
-      if(nodbl) return;                   // the badge's own click handler owns this press
+      if(nodbl) return;                   // a control inside the card owns this press
       if(e.detail === 1 || e.detail === 0) selectTile(key);
-      if(r[0]) tileActivate(key);
+      if(r[0]) tileActivate(key, stack);
     }
-    function tileActivate(key){ send("focus", key); }
+    // A project card jumps to the instance that most needs you, picked in Lua from fresh
+    // state among the card's visible members (focus-group); a stackless tile jumps to itself.
+    function tileActivate(key, stack){
+      if(stack){ send("focus-group", stack, JSON.stringify(cardKeysFor(stack))); return; }
+      send("focus", key);
+    }
     document.getElementById("grid").addEventListener("mousedown", onGridMouseDown);
 
     var EMPTY_WAITING = 'Waiting for Claude Code sessions...<br>Start a session in any project.';
@@ -13279,6 +13786,29 @@ local HTML = [[
     }
     var lastGridSig = null;   // grid content+order signature of the last actual render
 
+    // ---- Project stacks: ONE card per project (2026-09-10) ------------------------
+    // Lua pushes EVERY session and marks its stack (stackKey / stackRank / ...). The
+    // search + group filters run on SESSIONS first -- visibleItems(), so the bulk bar
+    // still acts on exactly what matched -- then each stack draws ONE card: its best-
+    // ranked MATCHING member. A session with no stackKey (stacks.enabled off) is its own
+    // card. Card order = the stack's first member in Lua's neediest-first order.
+    // CARD_KEYS remembers each card's visible members: a double-click jumps among them.
+    // tests/stack-fold.test.js runs this exact function.
+    var CARD_KEYS = {};
+    function foldCards(matched){
+      var byFold = {}, cards = [];
+      for(var i=0;i<matched.length;i++){
+        var it = matched[i];
+        var fk = it.stackKey ? "s:" + it.stackKey : "k:" + it.key;
+        var c = byFold[fk];
+        if(!c){ c = { fold: fk, stack: it.stackKey || null, drawn: it, keys: [] }; byFold[fk] = c; cards.push(c); }
+        c.keys.push(it.key);
+        if((it.stackRank || 1e9) < (c.drawn.stackRank || 1e9)) c.drawn = it;
+      }
+      return cards;
+    }
+    function cardKeysFor(stack){ var k = CARD_KEYS[stack]; return Array.isArray(k) ? k : []; }
+
     // Render the grid from lastItems through the active search filter. Re-run both on
     // a fresh ccUpdate and on every keystroke in the search bar (no re-fetch needed).
     function renderGrid(){
@@ -13287,18 +13817,26 @@ local HTML = [[
       renderGroupChips();  // refresh the group filter row from the latest data
       if(lastItems.length === 0){
         grid.innerHTML = ""; lastGridSig = null; empty.innerHTML = EMPTY_WAITING; empty.style.display = "block";
-        renderBulkBar([]); updateSearchCount(0, 0); return;
+        CARD_KEYS = {}; renderBulkBar([]); updateSearchCount(0, 0); return;
       }
-      var vis = visibleItems();
-      renderBulkBar(vis);  // fleet-action buttons reflect the visible (filtered) set
-      if(vis.length === 0){
+      var matched = visibleItems();
+      renderBulkBar(matched);  // fleet-action buttons reflect the matched (filtered) sessions
+      var totalCards = foldCards(lastItems).length;
+      if(matched.length === 0){
         grid.innerHTML = ""; lastGridSig = null; empty.innerHTML = "No sessions match your filter.";
-        empty.style.display = "block"; updateSearchCount(0, lastItems.length); return;
+        empty.style.display = "block"; CARD_KEYS = {}; updateSearchCount(0, totalCards); return;
       }
       empty.style.display = "none";
+      var cards = foldCards(matched);
+      var keysByStack = {};
+      cards.forEach(function(c){ if(c.stack) keysByStack[c.stack] = c.keys; });
+      CARD_KEYS = keysByStack;
+      var vis = cards.map(function(c){ return c.drawn; });   // one drawn member per card
       // F8: rebuild the grid HTML only when tile content/order actually changed; the
       // common 1Hz tick (nothing structural changed) skips the full innerHTML reparse
-      // and just refreshes the churning age text below.
+      // and just refreshes the churning age text below. A card's markup is a function
+      // of its drawn member alone, so the signature, the rebuild AND updateAges share
+      // `vis` -- grid.children stays index-aligned with it.
       var sig = gridSignature(vis);
       if(sig !== lastGridSig){
         grid.innerHTML = vis.map(tileHtml).join("");
@@ -13306,7 +13844,7 @@ local HTML = [[
       }
       updateAges(vis);
       paintSelection();
-      updateSearchCount(vis.length, lastItems.length);
+      updateSearchCount(vis.length, totalCards);   // "N / M shown" counts cards
     }
     // F8: the per-tile elapsed age ("2s"/"5m") ticks every second even when nothing else
     // changes -- update just those text nodes in place so a static fleet doesn't reparse
@@ -14725,17 +15263,22 @@ function FX._refreshBody()
     end
     if dirty then FX.saveAutoTitles(autoTitles) end
   end
+  -- Project stacks (2026-09-10): which repo + worktree each session belongs to, so a
+  -- repo's main checkout and its worktrees share one card. After the relabels (a repo
+  -- card takes its main checkout's relabel); hidden sessions included.
+  FX.annotateStacks(list, labels, cfg)
   -- Two sessions in ONE project used to render as IDENTICAL cards: the name (and
   -- any relabel) is per-projectKey, so nothing on either tile said which chat it
   -- was. Give each of those tiles its own chat title -- and only those, so a
-  -- project running a single session keeps its clean card.
+  -- project running a single session keeps its clean card. Keyed by STACK: every
+  -- instance on a multi-instance card (worktrees included) names its chat.
   do
-    local dupKeys = core.dupProjectKeys(list)
+    local dupKeys = core.dupStackKeys(list)
     if next(dupKeys) ~= nil then
       local live = {}
       for _, it in ipairs(list) do
         live[it.key] = true
-        if it.projectKey and dupKeys[it.projectKey] then
+        if (it.stackKey or it.projectKey) and dupKeys[it.stackKey or it.projectKey] then
           local t = FX.sessionAiTitle(it)
           if t and t ~= "" then
             -- The card's headline already says the project, and a chat title
@@ -14844,7 +15387,14 @@ function FX._refreshBody()
     end
   end
   FX._hiddenItems = hiddenList   -- the ☰ "Hidden sessions" view reads this
+  FX._shownItems = shownList     -- the Instances view reads this
+  -- Project stacks: rank each card's instances (the lead is what the card shows and
+  -- double-click jumps to). Hidden sessions never lead or count, so this runs on the
+  -- SHOWN list; the previous leads feed the anti-flap hold (core.rankInstances).
+  FX.seedSeen(list)
+  FX._stackLeads = core.stackInstances(shownList, FX.seenAt(), FX._stackLeads, hiddenList)
   if panelVisible then
+    FX.pushInstances(false)
     local payload = (#shownList == 0) and "[]" or hs.json.encode(shownList)
     local provs = core.config(cfg, "providers", nil)  -- reuse the cfg loaded above
     local provJson = (type(provs) == "table") and hs.json.encode(provs) or "[]"
