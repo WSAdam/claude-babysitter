@@ -262,14 +262,15 @@ do
   eq("ghost: no window identity -> NOT pruned", #core.staleDuplicateKeys(noId), 0)
 
   -- VS Code/Cursor have no kitty handles: the host_window pid (the claude process's
-  -- parent) is the per-window id. A /clear spawns a fresh claude under the SAME editor
+  -- parent) is the per-window id. A /clear leaves the retired tile under the SAME editor
   -- window -> old (ghost) + new share host_window -> prune the stale one. THIS is the
-  -- bug that left a duplicate ChargebackSentinel tile lingering up to 24h.
-  -- BOUNDARY (do not "fix" by pinning the claude pid -- that breaks /clear pruning):
-  -- host_window is per-WINDOW, not per-pane (unlike kitty's window id), so two parallel
-  -- claude sessions in ONE VS Code window share it. The resting (stale) one is then
-  -- pruned here as a false twin -- an accepted, SELF-HEALING trade-off: its tile
-  -- reappears on that session's next hook event. (Same assertion as this /clear case.)
+  -- bug that left a duplicate ChargebackSentinel tile lingering up to 24h. These tiles
+  -- carry no session_pid (status files from before it was recorded), so host_window
+  -- alone decides for them.
+  -- (2026-09-10, requirement change: the BOUNDARY that stood here -- "never pin the claude
+  -- pid, a /clear spawns a new process", accepting that a resting tab in a shared window
+  -- gets pruned -- rested on a premise c16cd0c disproved: /clear keeps the pid. Tabs in
+  -- one window share host_window but never session_pid; see the tabs block below.)
   local vsGhost = {
     { key = "vold", name = "cbs", projectKey = "p-cbs", stale = true,  host_window = "1301" },
     { key = "vnew", name = "cbs", projectKey = "p-cbs", stale = false, host_window = "1301" },
@@ -367,6 +368,40 @@ do
       kitty_listen_on = sock, kitty_window_id = "4" },
   }
   eq("ghost: legacy cwd-keyed same-folder ghost pruned", core.staleDuplicateKeys(legacy)[1], "o")
+end
+
+-- ---- Tabs in one VS Code window are not /clear ghosts (2026-09-10) ----
+do
+  -- 2026-09-10: every tab in a VS Code window shares host_window (the extension host), so
+  -- staleDuplicateKeys took a finished tab for a /clear ghost and deleted its status file.
+  local tabs = {
+    { key = "resting", name = "shepherd", projectKey = "p-shep", status = "done", stale = true,
+      host_window = "73020", session_pid = "75476" },
+    { key = "driving", name = "shepherd", projectKey = "p-shep", status = "working", stale = false,
+      host_window = "73020", session_pid = "80111" },
+  }
+  eq("tabs: a finished tab survives while another tab in its window works",
+     #core.staleDuplicateKeys(tabs), 0)
+
+  -- a /clear keeps the claude process (c16cd0c): same pid, new session id -> still a ghost
+  local cleared = {
+    { key = "retired", name = "shepherd", projectKey = "p-shep", stale = true,
+      host_window = "73020", session_pid = "75476" },
+    { key = "fresh", name = "shepherd", projectKey = "p-shep", stale = false,
+      host_window = "73020", session_pid = "75476" },
+  }
+  eq("tabs: a /clear in a tab still prunes the retired tile", core.staleDuplicateKeys(cleared)[1], "retired")
+  eq("tabs: a /clear in a tab prunes exactly one", #core.staleDuplicateKeys(cleared), 1)
+
+  -- a pid-less tile (written before session_pid was recorded) is no evidence against a tab
+  -- that has one: keep it -- the 24h backstop owns it, the same safe side as a half identity
+  local mixedPid = {
+    { key = "legacy", name = "shepherd", projectKey = "p-shep", stale = true, host_window = "73020" },
+    { key = "tab", name = "shepherd", projectKey = "p-shep", stale = false,
+      host_window = "73020", session_pid = "80111" },
+  }
+  eq("tabs: a pid-less stale tile never pairs with a tab that has a pid",
+     #core.staleDuplicateKeys(mixedPid), 0)
 end
 
 -- ---- effort: /effort slash command building + routing --------------------

@@ -50,6 +50,9 @@ and the README's "Testing & development" section.
 - Status heuristics must be checked on BOTH surfaces: the VS Code extension buffers the
   assistant message (a pending `tool_use` isn't in the transcript until after the tool
   runs); the terminal CLI writes it first.
+- One VS Code window hosts many sessions: every Claude tab in it shares `host_window` (the
+  extension-host pid), while `session_pid` is per session and survives `/clear`. Never
+  read a shared `host_window` as "the same session".
 - When live behaviour contradicts the code, dump the running state with `hs -c` before
   theorising (and compare the Hammerspoon process start time with the deployed files).
 

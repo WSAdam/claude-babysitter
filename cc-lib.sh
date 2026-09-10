@@ -121,10 +121,11 @@ cc_editor_app() {
 # The stable per-WINDOW host pid for a non-Kitty (VS Code/Cursor) session: walk our
 # ancestry to the editor-integrated `claude` process (the one run with
 # `--output-format stream-json`) and return ITS parent pid -- the editor window's host.
-# A /clear spawns a fresh claude (new session_id) under the SAME host, so the old
-# (ghost) tile and the new tile share it, while distinct editor windows have distinct
-# hosts -- giving the panel a kitty-window-id equivalent to auto-prune /clear ghosts
-# (see core.staleDuplicateKeys). Prints empty for Kitty (it has its own window id) or
+# A /clear mints a new session_id in the SAME claude process under the SAME host, so
+# the old (ghost) tile and the new tile share it, while distinct editor windows have
+# distinct hosts. Every Claude tab in one window shares the host too, which is why
+# core.staleDuplicateKeys pairs tiles on host + session_pid, not the host alone (tabs
+# are separate processes). Prints empty for Kitty (it has its own window id) or
 # when no such ancestor is found within the bounded walk -- the safe side: the panel
 # then never auto-prunes the tile and the 24h backstop owns its cleanup.
 # The claude session process's OWN pid, and its parent (the per-window host id), from

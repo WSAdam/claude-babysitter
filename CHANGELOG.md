@@ -4,6 +4,22 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — A finished Claude tab stays on the panel
+
+### Fixed — a resting tab was pruned as a /clear ghost while a sibling tab worked
+
+Several Claude tabs in one VS Code window all share `host_window` — the pid of that window's
+extension host. The /clear-ghost reaper (`core.staleDuplicateKeys`) treated "same project, same
+`host_window`, one tile stale" as proof that the stale tile was a session retired by `/clear`, so
+a tab that finished its turn was deleted about 90 seconds later whenever another tab in the same
+window was still working — its result, its "done" badge and its place on the project card gone
+until you happened to send it something. The test suite recorded this as an accepted, self-healing
+trade-off, on the belief that `/clear` starts a new process; c16cd0c showed it doesn't. VS Code
+tiles now pair on `host_window` **and** `session_pid`: a `/clear` keeps the process, so it still
+pairs and its retired tile is still reaped, while two tabs are two processes and never pair. A tile
+written before `session_pid` was recorded keeps the old rule against other pid-less tiles only.
+New fixtures in `tests/ui.test.lua` (red before the fix).
+
 ## 2026-09-10 — A worktree without a TODO.md can't crash My List
 
 ### Fixed — the repo import (and the auto-sync tick) threw on a missing TODO.md

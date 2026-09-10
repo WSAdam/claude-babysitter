@@ -4545,12 +4545,17 @@ end
 -- reuses the same window, while genuine parallel sessions occupy distinct windows.
 -- The per-window id is kitty's socket+window pair, or (non-kitty editors like VS
 -- Code/Cursor) the `host_window` pid cc-status.sh captures -- the claude session
--- process's parent, which a /clear keeps (a new session_id spawns a fresh claude
--- under the SAME editor window) and which differs per window. Tiles with NO window
--- identity at all are never pruned here; the 24h shouldPrune backstop owns those.
+-- process's parent, which a /clear keeps and which differs per window. But one VS Code
+-- window hosts MANY sessions (every Claude tab shares its extension host), so for
+-- those the id also carries the session's own `session_pid`: a /clear keeps the same
+-- process (c16cd0c), while a second tab is its own process -- two tabs in one window
+-- are never twins. A tile with no pid (written before session_pid was recorded) keeps
+-- the bare host_window id, so it only ever pairs with another pid-less tile. Tiles
+-- with NO window identity at all are never pruned here; the 24h shouldPrune backstop
+-- owns those.
 function M.staleDuplicateKeys(list)
   local function projKey(it) return it.projectKey or it.cwd end
-  local function termId(it)  -- a STABLE per-window id; nil when unknown
+  local function termId(it)  -- a STABLE per-window (and, in VS Code, per-tab) id; nil when unknown
     local sock, wid = it.kitty_listen_on, it.kitty_window_id
     -- kitty: need BOTH socket+window id -- a bare window id is a per-instance counter
     -- (two default kitty instances both yield "1"), so a half identity falls through to
@@ -4559,9 +4564,14 @@ function M.staleDuplicateKeys(list)
       return "kitty:" .. tostring(sock) .. "#" .. tostring(wid)
     end
     -- non-kitty editors have no kitty handles: use the host-window pid (the claude
-    -- session process's parent -- stable across /clear, distinct per editor window).
+    -- session process's parent -- stable across /clear, distinct per editor window),
+    -- narrowed to the session's own process when its pid is known (tabs share a host).
     local hw = it.host_window
-    if hw ~= nil and tostring(hw) ~= "" then return "host:" .. tostring(hw) end
+    if hw ~= nil and tostring(hw) ~= "" then
+      local sp = it.session_pid
+      if sp ~= nil and tostring(sp) ~= "" then return "host:" .. tostring(hw) .. "#pid:" .. tostring(sp) end
+      return "host:" .. tostring(hw)
+    end
     return nil
   end
   local liveTerms = {}  -- projectKey -> { [termId] = true } for non-stale tiles
