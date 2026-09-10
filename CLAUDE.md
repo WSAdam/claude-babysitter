@@ -28,10 +28,13 @@ and the README's "Testing & development" section.
 - After a deploy, verify the **running** VM with `hs -c` by probing something new in the
   change — the live modules hang off `_G.__ccDashboard`
   (e.g. `hs -c 'return type(_G.__ccDashboard.core.someNewFn)'`, `.fx` for `FX`).
-- **Worktrees:** `make install` deploys whichever checkout runs it. Only one worktree deploys
-  at a time, and after a merge redeploy from main so the live copy is main. Worktrees live
-  at `../claude-instance-manager-<slug>`; TODO.md is gitignored so a worktree's copy never
-  blocks `git worktree remove` (`tests/worktree-hygiene.test.sh`).
+- **Worktrees:** Shepherd needs no dev server or browser of its own, so units take the tabs
+  default: `EnterWorktree` with name `<slug>` → `.claude/worktrees/<slug>`, then
+  `git branch -m <type>/<slug>`. `make install` deploys whichever checkout runs it — only
+  one worktree deploys at a time, and after a merge redeploy from main so the live copy is
+  main. TODO.md is gitignored, so a worktree's copy never blocks `git worktree remove`
+  (`tests/worktree-hygiene.test.sh`); main's TODO.md is updated after `ExitWorktree`, since
+  the fence blocks main from inside a worktree.
 
 ## Traps that have bitten this repo
 
