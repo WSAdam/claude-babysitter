@@ -3141,6 +3141,13 @@ do
   check("newtab-pin: a warm spawn into a window with a live Claude session opens a new tab before any ⌘Esc",
         iCheck and iWarm and iCheck < iWarm
         and src:find('FX.openClaudeTab({ root = proj, editor = spec.editor, prompt = spec.task or "" })', 1, true) ~= nil or false)
+  -- 2026-09-10 spike: the extension's ?session= reveal resumes a session held by the sidebar (or
+  -- another window) in a NEW tab with a second claude process -- Jump stays window-level (spec D-14)
+  local cf = io.open(ROOT .. "cc-core.lua", "r")
+  local csrc = cf and cf:read("*a") or ""
+  if cf then cf:close() end
+  check("d14-pin: nothing sends the extension's ?session= URI (it can fork a live session)",
+        #csrc > 0 and src:find("?session=", 1, true) == nil and csrc:find("?session=", 1, true) == nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

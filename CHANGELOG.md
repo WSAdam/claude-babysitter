@@ -4,6 +4,16 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — Jump stays window-level (spike: exact-tab reveal dropped)
+
+A spike tried bringing a session's own Claude tab to the front on Jump with the extension's
+`vscode://anthropic.claude-code/open?session=<id>`. It works for an editor tab in the window the
+URI reaches — verified live: the active tab switched, no second panel, no second launch — and it
+follows `/clear`. It was dropped anyway: for a session held anywhere else (the Claude sidebar, or a
+different window after a focus race) the extension opens a new tab that resumes the session and
+starts a second Claude process on it, and Shepherd can't tell a sidebar session from an editor tab.
+No code shipped; the reasoning is decision D-14 in `spec/product/spec.md`.
+
 ## 2026-09-10 — A new session in an open project gets its own tab
 
 ### Fixed — spawning into a window that already had a Claude tab typed into that tab

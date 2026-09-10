@@ -125,6 +125,17 @@ before the URI goes out, and **never sends the prompt** — the operator reads i
 Return. A prefilled tab costs one keypress; an automatic Return would be the very keystroke into a
 shared window that D-12 refuses. **[DECISION D-13]**
 
+Jump stays **window-level**: it doesn't bring a session's own tab to the front. The same URI with
+`?session=<id>` can — a 2026-09-10 spike showed it switches the active tab to that session's
+editor tab with no second panel, and it follows `/clear` (the extension rebinds the tab to the new
+session id). But when the window the URI reaches holds the session anywhere *other* than an editor
+tab — the Claude **sidebar**, or a different window after a focus race or with two windows on one
+folder — the extension opens a new tab that resumes the session and launches a **second Claude
+process on it** (its webview calls `launchClaude()` even when the session is live in another
+surface). Shepherd can't tell a sidebar session from an editor tab, so a Jump would risk forking a
+live session; instead you pick the tab (its title is the chat title). Revisit if the extension ever
+refuses to resume a session live elsewhere. **[DECISION D-14]**
+
 ## 6. Observability (local, derived, zero extra hooks)
 
 All from the transcript Shepherd already tails — **no extra hooks, no model tokens**:

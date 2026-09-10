@@ -211,7 +211,10 @@ window). Each refusal is logged and raises an alert (at most once a minute per s
 detail panel greys those controls and says how many sessions share the window. **Jump**,
 **hands-free approvals** (the gate's decision file), Queue add, Gate and Policy still work, and
 kitty sessions are unaffected. A queued task simply waits. `keystrokes.refuseSharedWindow:
-false` in `~/.claude/cc-config.json` turns the guard off.
+false` in `~/.claude/cc-config.json` turns the guard off. Jump brings the session's *window*
+forward, not its tab — pick the tab by its chat title. (Revealing the exact tab through the Claude
+extension's URI was tried and dropped: for a session in the Claude sidebar it would start a second
+Claude process on the same session — see decision D-14 in `spec/product/spec.md`.)
 
 **Right-click** a tile for a context menu:
 
