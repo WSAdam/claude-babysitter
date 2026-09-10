@@ -8600,5 +8600,62 @@ do
   eq("guard: ...and still reaches the lone one", sweep[1] and sweep[1].key, "c")
 end
 
+-- ---- New worktree tab: a Claude tab that starts its own worktree (2026-09-10) ----
+-- The Claude Code extension's URI handler (vscode://anthropic.claude-code/open?prompt=)
+-- opens a NEW Claude tab in the active window with the prompt typed in, never sent. The
+-- prompt tells that tab to EnterWorktree (no approval prompt under .claude/worktrees/)
+-- and rename the branch to the unit's <type>/<slug>.
+do
+  eq("urlEncode: unreserved characters pass through", core.urlEncode("aZ09-._~"), "aZ09-._~")
+  eq("urlEncode: spaces, quotes, & # / newlines and unicode are escaped",
+     core.urlEncode('a b"&#/\n\195\169'), "a%20b%22%26%23%2F%0A%C3%A9")
+  eq("tabUri: VS Code", core.claudeTabUri("com.microsoft.VSCode", "hi there"),
+     "vscode://anthropic.claude-code/open?prompt=hi%20there")
+  eq("tabUri: VS Code Insiders", core.claudeTabUri("com.microsoft.VSCodeInsiders", "x"),
+     "vscode-insiders://anthropic.claude-code/open?prompt=x")
+  eq("tabUri: Cursor", core.claudeTabUri("com.todesktop.230313mzl4w4u92", "x"), "cursor://anthropic.claude-code/open?prompt=x")
+  eq("tabUri: an unknown app falls back on the editor kind", core.claudeTabUri(nil, "x", "cursor"),
+     "cursor://anthropic.claude-code/open?prompt=x")
+  eq("tabUri: no prompt opens an empty tab", core.claudeTabUri("com.microsoft.VSCode", nil), "vscode://anthropic.claude-code/open")
+
+  local ctx = { mainRoot = "/r/main", branches = { ["main"] = true, ["fix/taken"] = true, ["worktree-old"] = true },
+                worktrees = { { path = "/r/main" }, { path = "/r/main/.claude/worktrees/busy" } } }
+  local req = core.newWorktreeTabRequest({ type = "fix", slug = "login-redirect" }, ctx)
+  eq("request: the branch is <type>/<slug>", req and req.branch, "fix/login-redirect")
+  eq("request: the worktree lands in .claude/worktrees/<slug>", req and req.path, "/r/main/.claude/worktrees/login-redirect")
+  local function why(spec) local r, w = core.newWorktreeTabRequest(spec, ctx); return r == nil and w or nil end
+  check("request: an unknown type is refused", why({ type = "chore", slug = "x" }) ~= nil)
+  check("request: a slug with a slash is refused", why({ type = "fix", slug = "a/b" }) ~= nil)
+  check("request: a slug starting with - is refused", why({ type = "fix", slug = "-x" }) ~= nil)
+  check("request: .. is refused", why({ type = "fix", slug = "a..b" }) ~= nil)
+  check("request: a trailing . or .lock is refused", why({ type = "fix", slug = "a." }) ~= nil and why({ type = "fix", slug = "a.lock" }) ~= nil)
+  check("request: uppercase is refused (the form lowercases first)", why({ type = "fix", slug = "Login" }) ~= nil)
+  check("request: past 40 characters is refused", why({ type = "fix", slug = string.rep("a", 41) }) ~= nil)
+  check("request: an existing branch is refused", (why({ type = "fix", slug = "taken" }) or ""):find("already exists", 1, true) ~= nil)
+  check("request: the branch EnterWorktree would create is checked too", why({ type = "feat", slug = "old" }) ~= nil)
+  check("request: a path git already lists as a worktree is refused", why({ type = "ui", slug = "busy" }) ~= nil)
+  check("request: a folder already on disk there is refused",
+        select(2, core.newWorktreeTabRequest({ type = "fix", slug = "left" },
+          { mainRoot = "/r/main", exists = function(p) return p == "/r/main/.claude/worktrees/left" end })) ~= nil)
+  check("request: no main checkout is refused", select(2, core.newWorktreeTabRequest({ type = "fix", slug = "x" }, {})) ~= nil)
+
+  local p = core.worktreeTabPrompt(req, '  make the "login" redirect work  ')
+  check("prompt: names EnterWorktree with the slug", p:find('EnterWorktree with name "login-redirect"', 1, true) ~= nil)
+  check("prompt: renames the branch to the unit's", p:find("git branch -m fix/login-redirect", 1, true) ~= nil)
+  check("prompt: carries the task, trimmed", p:find('make the "login" redirect work', 1, true) ~= nil and not p:find("  make", 1, true))
+  check("prompt: with no task, waits for instructions", core.worktreeTabPrompt(req, ""):find("wait for my instructions", 1, true) ~= nil)
+  check("prompt: a runaway task is capped", #core.worktreeTabPrompt(req, string.rep("x", 9000)) < 4500)
+  local ep = core.enterWorktreePrompt("/r/main/.claude/worktrees/busy", "fix/busy")
+  check("resume prompt: EnterWorktree with the worktree's path",
+        ep:find('EnterWorktree with path "/r/main/.claude/worktrees/busy"', 1, true) ~= nil and ep:find("fix/busy", 1, true) ~= nil)
+  check("isClaudeWorktree: a folder under .claude/worktrees/", core.isClaudeWorktree("/r/main", "/r/main/.claude/worktrees/x"))
+  check("isClaudeWorktree: a sibling folder isn't", not core.isClaudeWorktree("/r/main", "/r/main-x"))
+  check("isClaudeWorktree: the worktrees folder itself isn't", not core.isClaudeWorktree("/r/main", "/r/main/.claude/worktrees"))
+  local bl = core.parseBranchList("main\nfix/y\n\n  ui/z  \n")
+  check("branches: parsed into a set", bl.main and bl["fix/y"] and bl["ui/z"] and not bl[""])
+  local pay = core.instancesPayload("repo:/r/main/.git", {}, {}, {}, { mainRoot = "/r/main", canNewTab = true })
+  eq("payload: says when the card can open a new worktree tab", pay.canNewTab, true)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

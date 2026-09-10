@@ -39,6 +39,8 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **developer**, I want the detail panel to stay on the instance I selected even when its card starts showing a different one, so that a nudge I'm typing never goes to the wrong worktree.
 - As a **fleet operator**, I want to switch project cards off (`stacks.enabled`) and get one card per session back, so that I can fall back if folding ever gets in my way.
 - As a **fleet operator**, I want a Claude tab that moved into its own worktree to show that worktree's branch on the project card and in Instances, so that I can tell my tabs apart and never reopen a worktree a tab is already working in.
+- As a **developer**, I want a New worktree tab button that opens a Claude tab in the repo's window with the prompt to enter a named worktree already typed in, so that starting a parallel unit takes one form and one Return instead of a manual setup.
+- As a **developer**, I want Open on an idle worktree under .claude/worktrees/ to resume it in a new tab of the repo's window, so that a parked unit comes back where the rest of the project's tabs live.
 
 ## Session observability
 

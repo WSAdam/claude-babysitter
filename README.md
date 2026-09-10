@@ -159,6 +159,16 @@ per project**, not one per session.
   `EnterWorktree` (into `.claude/worktrees/<slug>`, or into a sibling folder) stays on the
   repo's card but shows the worktree **it is working in** — its branch, its folder in
   Instances (never offered to Open while it's there) and its `TODO.md` in My List.
+- **＋ New worktree tab** (Instances header, or right-click a card → **New worktree tab…**):
+  pick a type (feat / fix / ui / docs), a name and, optionally, what it should do. Shepherd
+  checks the name against the repo's branches and worktrees, brings the repo's own window to
+  the front, and opens a **new Claude tab** there through the Claude extension's URI — with a
+  prompt already typed in: *EnterWorktree with that name, rename the branch to
+  `<type>/<name>`, then the task*. Nothing is sent: read or edit the prompt and press Return.
+  If the repo has no window open, its folder is opened first; if its window isn't in front
+  when the tab would open, nothing opens. **Open** on an idle `.claude/worktrees/` worktree
+  works the same way — a new tab in the repo's window whose prompt re-enters that worktree —
+  while a sibling worktree still opens in its own window. VS Code and Cursor only.
 - **What the card shows.** The instance that most needs you — blocked longest first
   (approval or question, then error, then stalled), then the newest *finished* one you haven't
   jumped to yet, else the most recently active — with its branch chip and an

@@ -117,6 +117,14 @@ is in front — so a session in a shared window gets **no keystroke effect**: Sh
 says why rather than risk the wrong tab, and the automatic senders skip it. Jump and headless
 approvals are unaffected; `keystrokes.refuseSharedWindow` turns the guard off. **[DECISION D-12]**
 
+New Claude tabs don't go through keystrokes at all: the Claude extension's
+`vscode://anthropic.claude-code/open?prompt=` URI opens a **new** tab in the *active* editor
+window with the prompt typed in. Shepherd uses it for **New worktree tab** (and to resume an idle
+`.claude/worktrees/` worktree): it brings the repo's own window to the front, re-checks it right
+before the URI goes out, and **never sends the prompt** — the operator reads it and presses
+Return. A prefilled tab costs one keypress; an automatic Return would be the very keystroke into a
+shared window that D-12 refuses. **[DECISION D-13]**
+
 ## 6. Observability (local, derived, zero extra hooks)
 
 All from the transcript Shepherd already tails — **no extra hooks, no model tokens**:

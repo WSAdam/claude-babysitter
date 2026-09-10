@@ -56,6 +56,9 @@ and the README's "Testing & development" section.
 - Keystrokes go to a window, not a tab: effects refuse a session whose window hosts others
   (`it.sharedWindow`, `core.keystrokeBlocked`). Build every target with `FX.targetFor(it)`,
   and make a new automatic sender skip blocked sessions up front so it can't retry every tick.
+- `vscode://anthropic.claude-code/open?prompt=` opens a new Claude tab in the ACTIVE editor
+  window, prompt typed in but never sent. Only `FX.openClaudeTab` sends it, after a positive
+  window match re-checked right before the URI goes out; never follow it with a keystroke.
 - When live behaviour contradicts the code, dump the running state with `hs -c` before
   theorising (and compare the Hammerspoon process start time with the deployed files).
 

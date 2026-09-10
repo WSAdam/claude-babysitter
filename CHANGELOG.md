@@ -4,6 +4,27 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — New worktree tab
+
+### Added — start a unit as a new Claude tab in its own worktree
+
+Parallel units now run as Claude tabs in the repo's one VS Code window, each in its own
+`.claude/worktrees/<slug>` (entering one there needs no approval click). The Instances view has a
+**＋ New worktree tab** button — also on a card's right-click menu — with a small form: type
+(feat/fix/ui/docs), a name, and an optional task. Lua checks the name against git's branches and
+worktrees (`core.newWorktreeTabRequest`: the unit's `<type>/<slug>` branch, the `worktree-<slug>`
+branch EnterWorktree would create, a listed worktree or a folder already there), then
+`FX.openClaudeTab` brings the repo's own window to the front and opens the Claude extension's
+`vscode://anthropic.claude-code/open?prompt=…` URI: a new Claude tab in that window with the
+prompt *typed in, never sent* — EnterWorktree with the name, `git branch -m <type>/<slug>`, then
+the task. The URI runs in whichever editor window is active, so the window match is re-checked
+right before it goes out and anything else opens nothing; with no window for the repo, the folder
+is opened and its window awaited like a cold spawn. No keystroke is ever sent. **Open** on an idle
+`.claude/worktrees/` worktree now does the same — a new tab whose prompt re-enters it by path —
+instead of opening the nested folder as a window of its own. Tests: `tests/core.test.lua`, the
+behavioral `tests/new-worktree-tab.test.lua` (a fake VS Code window; captured URIs; zero
+keystrokes), `tests/new-tab-form.test.js` and source pins.
+
 ## 2026-09-10 — No keystrokes into a window shared by several sessions
 
 ### Added — the shared-window guard

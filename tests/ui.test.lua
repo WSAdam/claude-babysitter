@@ -3106,5 +3106,36 @@ do
         and src:find('<div id="d-shared"></div>', 1, true) ~= nil)
 end
 
+-- ---- New worktree tab: a Claude tab through the extension's URI (2026-09-10) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local function body(sig, len) local i = src:find(sig, 1, true); return i and src:sub(i, i + (len or 3000)) or "" end
+  local open = body("function FX.openClaudeTab(opts)", 3200)
+  check("newtab-pin: the URI is built only by core.claudeTabUri (fixed scheme + host)",
+        src:find("anthropic.claude-code", 1, true) == nil
+        and open:find("local uri = core.claudeTabUri(", 1, true) ~= nil and open:find("hs.urlevent.openURL(uri)", 1, true) ~= nil)
+  local iCheck, iOpen = open:find("core.pickWindow({ title }", 1, true), open:find("hs.urlevent.openURL(uri)", 1, true)
+  check("newtab-pin: the front window is re-checked right before the URI goes out",
+        iCheck and iOpen and iCheck < iOpen or false)
+  check("newtab-pin: opening a tab is serialized on the injection tail and never presses a key",
+        open:find('dispatchSerialized({ editor = editor }, "new-tab", function()', 1, true) ~= nil
+        and open:find("hs.eventtap", 1, true) == nil)
+  local req = body("function FX.newWorktreeTab(stackKey, specJson)", 2600)
+  local iReq, iTab = req:find("core.newWorktreeTabRequest(spec, {", 1, true), req:find("FX.openClaudeTab({", 1, true)
+  check("newtab-pin: the request is checked against git before anything opens",
+        iReq and iTab and iReq < iTab or false)
+  local ow = body("function FX.openWorktree(stackKey, path)", 3000)
+  local iVerdict, iResume = ow:find("core.openWorktreeVerdict(wts, target, live, {", 1, true), ow:find("FX.openClaudeTab({", 1, true)
+  check("newtab-pin: Open resumes a .claude/worktrees/ worktree as a tab only after the verdict",
+        iVerdict and iResume and iVerdict < iResume and ow:find("core.isClaudeWorktree(any.mainRoot, target)", 1, true) ~= nil or false)
+  check("newtab-pin: the bridge hands the JSON to Lua, which decodes and checks it",
+        src:find('if a == "new-worktree-tab" then', 1, true) ~= nil
+        and src:find('send("new-worktree-tab", INST.stackKey, m.text);', 1, true) ~= nil)
+  check("newtab-pin: the card menu opens Instances with the form open",
+        src:find('wv:evaluateJavaScript("openInstancesFor(" .. jsString(item.stackKey) .. ", true)")', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

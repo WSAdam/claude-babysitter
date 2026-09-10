@@ -51,6 +51,9 @@ echo ""
 echo "== node: project cards (behavioral, runs the shipped fold + card extras) =="
 node "$DIR/stack-fold.test.js" || fail=1
 echo ""
+echo "== node: the New worktree tab form (behavioral, runs the shipped form helpers) =="
+node "$DIR/new-tab-form.test.js" || fail=1
+echo ""
 echo "== bash: CLI-tools viewer wiring tripwire =="
 bash "$DIR/mcpskills-tools.test.sh" || fail=1
 echo ""
@@ -82,6 +85,9 @@ HOME="$(mktemp -d)" lua "$DIR/tab-worktree.test.lua" || fail=1
 echo ""
 echo "== lua: no keystrokes into a window shared by several sessions (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/shared-window.test.lua" || fail=1
+echo ""
+echo "== lua: New worktree tab opens a prefilled Claude tab, never a keystroke (behavioral, stubbed hs + git) =="
+HOME="$(mktemp -d)" lua "$DIR/new-worktree-tab.test.lua" || fail=1
 echo ""
 
 if [ "$fail" -eq 0 ]; then

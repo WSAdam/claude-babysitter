@@ -1024,7 +1024,103 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
     end
   end
   return { stackKey = stackKey, stackName = opts.stackName, repoKey = opts.repoKey, mainRoot = opts.mainRoot,
-           gone = (#rows == 0), members = rows, worktrees = idle, listError = opts.listError }
+           gone = (#rows == 0), members = rows, worktrees = idle, listError = opts.listError,
+           canNewTab = opts.canNewTab and true or nil }
+end
+
+-- ---- New worktree tab (2026-09-10) ------------------------------------------------
+-- The Claude Code extension's URI handler: vscode://anthropic.claude-code/open?prompt=<text>
+-- opens a NEW Claude tab in the ACTIVE editor window with <text> typed into its input --
+-- never sent. The tab's prompt tells it to EnterWorktree (no approval prompt under
+-- .claude/worktrees/) and name the branch after the unit.
+M.WORKTREE_TYPES = { "feat", "fix", "ui", "docs" }
+
+-- Percent-encode a URI query value: everything but A-Z a-z 0-9 - . _ ~ (UTF-8 bytewise).
+function M.urlEncode(s)
+  return (tostring(s or ""):gsub("[^%w%-%._~]", function(c) return string.format("%%%02X", c:byte()) end))
+end
+
+local CLAUDE_URI_SCHEMES = {
+  ["com.microsoft.VSCode"] = "vscode",
+  ["com.microsoft.VSCodeInsiders"] = "vscode-insiders",
+  ["com.todesktop.230313mzl4w4u92"] = "cursor",
+}
+-- The extension's URI for the editor app that owns the window (its bundle id), falling
+-- back on the session's editor kind. The scheme and host are fixed; only the prompt varies.
+function M.claudeTabUri(bundleId, prompt, editor)
+  local scheme = CLAUDE_URI_SCHEMES[tostring(bundleId or "")] or ((editor == "cursor") and "cursor" or "vscode")
+  local q = (type(prompt) == "string" and prompt ~= "") and ("?prompt=" .. M.urlEncode(prompt)) or ""
+  return scheme .. "://anthropic.claude-code/open" .. q
+end
+
+-- `git for-each-ref --format=%(refname:short) refs/heads` -> { [branch] = true }.
+function M.parseBranchList(out)
+  local set = {}
+  for line in tostring(out or ""):gmatch("[^\r\n]+") do
+    local b = line:match("^%s*(.-)%s*$")
+    if b ~= "" then set[b] = true end
+  end
+  return set
+end
+
+-- Validate a New worktree tab request before anything opens: a known type, a slug that
+-- EnterWorktree and git both accept (lowercase, at most 40), and no branch -- neither the
+-- unit's <type>/<slug> nor the worktree-<slug> EnterWorktree creates first -- or worktree
+-- (listed by git, or a folder on disk) already there.
+-- ctx = { mainRoot, branches = set, worktrees = { {path} }, exists = fn(path) }.
+-- Returns { type, slug, branch, path } or nil, reason.
+function M.newWorktreeTabRequest(spec, ctx)
+  spec = type(spec) == "table" and spec or {}
+  ctx = type(ctx) == "table" and ctx or {}
+  local t = tostring(spec.type or "")
+  local okType = false
+  for _, k in ipairs(M.WORKTREE_TYPES) do if k == t then okType = true end end
+  if not okType then return nil, "pick a type: feat, fix, ui or docs" end
+  local slug = tostring(spec.slug or "")
+  if not slug:match("^[a-z0-9][a-z0-9._-]*$") or #slug > 40 or slug:find("..", 1, true)
+     or slug:sub(-1) == "." or slug:match("%.lock$") then
+    return nil, "the name takes lowercase letters, digits, dots, dashes and underscores (at most 40)"
+  end
+  if type(ctx.mainRoot) ~= "string" or ctx.mainRoot == "" then return nil, "no main checkout for this project" end
+  local branch = t .. "/" .. slug
+  local branches = type(ctx.branches) == "table" and ctx.branches or {}
+  if branches[branch] then return nil, "a branch " .. branch .. " already exists" end
+  if branches["worktree-" .. slug] then return nil, "a branch worktree-" .. slug .. " already exists" end
+  local path = M.normDir(ctx.mainRoot) .. "/.claude/worktrees/" .. slug
+  for _, w in ipairs(ctx.worktrees or {}) do
+    if type(w) == "table" and M.normDir(tostring(w.path or "")) == path then
+      return nil, "a worktree is already at .claude/worktrees/" .. slug
+    end
+  end
+  if type(ctx.exists) == "function" and ctx.exists(path) then
+    return nil, "something is already at .claude/worktrees/" .. slug
+  end
+  return { type = t, slug = slug, branch = branch, path = path }
+end
+
+-- The prompt a new worktree tab opens with (typed in, not sent). The task is trimmed and
+-- capped; with none, the tab waits for instructions once it's in its worktree.
+function M.worktreeTabPrompt(req, task)
+  task = type(task) == "string" and task:gsub("^%s+", ""):gsub("%s+$", "") or ""
+  if #task > 4000 then task = task:sub(1, 4000) end
+  return "Start unit " .. req.branch .. " in its own worktree: call EnterWorktree with name \"" .. req.slug
+    .. "\", then rename its branch with `git branch -m " .. req.branch .. "`.\n\n"
+    .. (task ~= "" and task or "Then wait for my instructions.")
+end
+
+-- The prompt that picks an existing .claude/worktrees/ worktree back up in a new tab.
+function M.enterWorktreePrompt(path, branch)
+  return "Resume work in the worktree at " .. tostring(path)
+    .. ((type(branch) == "string" and branch ~= "") and (" (branch " .. branch .. ")") or "")
+    .. ": call EnterWorktree with path \"" .. tostring(path) .. "\", then wait for my instructions."
+end
+
+-- Is `path` a worktree Claude made under the main checkout's .claude/worktrees/?
+function M.isClaudeWorktree(mainRoot, path)
+  if type(mainRoot) ~= "string" or type(path) ~= "string" then return false end
+  local base = M.normDir(mainRoot) .. "/.claude/worktrees/"
+  local p = M.normDir(path)
+  return p:sub(1, #base) == base and #p > #base
 end
 
 -- ---- Lockscreen board (what the lock overlay draws) -------------------------
@@ -10726,7 +10822,7 @@ M.FEATURES = {
     what = "Rename tiles and bucket them into cohorts, then scope the grid to one group.",
     why = "Keep a big fleet organized and filter down to just what you're working on." },
   { key = "stacks", cat = "Core", new = true, title = "Project cards & instances",
-    what = "A repo's main checkout and its worktrees — or two sessions in one folder — share one card that shows whichever instance needs you. The corner button lists every instance, and the worktrees with no session so you can open one.",
+    what = "A repo's main checkout and its worktrees — or two sessions in one folder — share one card that shows whichever instance needs you. The corner button lists every instance, and the worktrees with no session so you can open one — or start a New worktree tab: a Claude tab in the repo's window with the prompt to enter its own worktree typed in.",
     why = "Parallel units of work on one project read as one project, and a double-click always lands on the instance that's waiting." },
 
   -- ---- Control ----

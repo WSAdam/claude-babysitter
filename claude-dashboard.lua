@@ -3668,7 +3668,8 @@ function FX.pushInstances(force)
   end
   local p = core.instancesPayload(v.stackKey, shown, hidden, v.wt or {}, {
     stackName = v.stackName, repoKey = v.repoKey, mainRoot = v.mainRoot,
-    pending = FX._openingWt, listError = v.listError })
+    pending = FX._openingWt, listError = v.listError,
+    canNewTab = (v.mainRoot ~= nil and FX.tabEditorFor(v.stackKey) ~= nil) })
   local js = hs.json.encode(p)
   if force or js ~= v.json then
     v.json = js
@@ -3711,10 +3712,134 @@ function FX.openWorktree(stackKey, path)
   if editor ~= "vscode" and editor ~= "cursor" and editor ~= "kitty" and editor ~= "terminal" then
     editor = core.config(cfg, "spawn.editor", "vscode")
   end
+  -- A worktree a Claude tab made (.claude/worktrees/<slug>) lives INSIDE the main checkout:
+  -- pick it back up as a new tab in the repo's window, never a window of its own.
+  local tabEditor = FX.tabEditorFor(stackKey)
+  if tabEditor and core.isClaudeWorktree(any.mainRoot, target) then
+    local branch
+    for _, w in ipairs(wts) do if core.normDir(tostring(w.path or "")) == target then branch = w.branch end end
+    print("[cc-dashboard] open-worktree: " .. target .. " as a new tab in " .. tostring(any.mainRoot))
+    if FX.openClaudeTab({ root = any.mainRoot, editor = tabEditor, label = any.stackName,
+                          prompt = core.enterWorktreePrompt(target, branch) }) then
+      FX._openingWt[target] = now
+    end
+    FX.pushInstances(true)
+    return
+  end
   print("[cc-dashboard] open-worktree: " .. target .. " in " .. tostring(editor))
   local launched = FX.spawnSession(editor, target, nil, nil, nil, nil, true)
   if launched then FX._openingWt[target] = now end
   FX.pushInstances(true)
+end
+
+-- The editor a card's new Claude tabs open in: VS Code or Cursor (the only editors with the
+-- Claude extension's URI handler) -- the stack's own sessions first, then spawn.editor.
+-- nil when neither is one of those (kitty / terminal projects get no New worktree tab).
+function FX.tabEditorFor(stackKey)
+  for _, it in ipairs(lastRenderList or {}) do
+    if it.stackKey == stackKey and not it.remote and (it.editor == "vscode" or it.editor == "cursor") then
+      return it.editor
+    end
+  end
+  local e = core.config(loadConfig(), "spawn.editor", "vscode")
+  return (e == "vscode" or e == "cursor") and e or nil
+end
+
+-- Open a NEW Claude tab in the VS Code/Cursor window for `root`, its prompt typed in and
+-- never sent (2026-09-10). The extension's URI handler runs in the ACTIVE window, so the
+-- root's own window must be in front: a positive window match, re-checked right before
+-- the URI goes out -- anything else opens nothing. With no window for the root yet, the
+-- folder is opened and its window awaited like a cold spawn (core.coldStartStep).
+-- Serialized on the injection tail (it moves focus). Presses no key.
+-- opts = { root, editor, prompt, label }. Returns true once the attempt is scheduled.
+function FX.openClaudeTab(opts)
+  opts = type(opts) == "table" and opts or {}
+  local root = type(opts.root) == "string" and opts.root ~= "" and core.normDir(opts.root) or nil
+  if not root or type(opts.prompt) ~= "string" then return false end
+  local editor = (opts.editor == "cursor") and "cursor" or "vscode"
+  local name = root:match("([^/]+)$") or root
+  local label = tostring(opts.label or name)
+  local match = { ancestors = false }
+  local function send()
+    local w = hs.window.focusedWindow()
+    local title = w and w:title() or ""
+    if not (w and core.pickWindow({ title }, name, root, os.getenv("USER"), { editor = editor, ancestors = false })) then
+      print("[cc-dashboard] new tab: " .. name .. "'s window wasn't in front -- nothing opened")
+      hs.alert.show("New Claude tab not opened: " .. label .. "'s window wasn't in front")
+      return
+    end
+    local app = w:application()
+    local uri = core.claudeTabUri(app and app:bundleID() or nil, opts.prompt, editor)
+    print("[cc-dashboard] new tab in " .. name)
+    hs.urlevent.openURL(uri)
+    hs.alert.show("New Claude tab in " .. label .. " — check the prompt and press Return")
+  end
+  dispatchSerialized({ editor = editor }, "new-tab", function()
+    if focusProject(name, root, editor, false, match) then
+      after(math.max(FOCUS_DELAY, 0.35), send)   -- let the editor register its active window
+      return
+    end
+    print("[cc-dashboard] new tab: no window for " .. name .. " yet -- opening the folder")
+    local t = hs.task.new("/usr/bin/open", nil,
+      core.vscodeOpenArgs({ app = (editor == "cursor") and "Cursor" or "Visual Studio Code", project = root }))
+    if t then t:start() end
+    FX._newTabTask = t
+    local elapsed, waitMax, activate = 0, 25, 6
+    local function poll()
+      local step = core.coldStartStep(focusProject(name, root, editor, false, match), elapsed, waitMax)
+      if step == "open" then
+        after(activate, send)                      -- the extension needs a moment to load
+      elseif step == "wait" then
+        elapsed = elapsed + 1
+        after(1.0, poll)
+      else
+        print("[cc-dashboard] new tab: " .. name .. "'s window never appeared -- nothing opened")
+        hs.alert.show("New Claude tab not opened: " .. label .. "'s window never appeared")
+      end
+    end
+    after(2.0, poll)
+  end)
+  return true
+end
+
+-- "New worktree tab" from a card (the Instances form). The repo comes from the card's own
+-- live sessions and the request is checked against git's branches and worktrees
+-- (core.newWorktreeTabRequest) before anything opens; the tab then opens in the repo's
+-- window with the EnterWorktree prompt typed in (FX.openClaudeTab).
+function FX.newWorktreeTab(stackKey, specJson)
+  local ok, spec = pcall(function() return hs.json.decode(tostring(specJson or "")) end)
+  if not ok or type(spec) ~= "table" then return end
+  local any
+  for _, it in ipairs(lastRenderList or {}) do
+    if it.stackKey == stackKey and it.repoKey and it.mainRoot then any = it; break end
+  end
+  if not any then
+    print("[cc-dashboard] new-worktree-tab: no repo behind stack " .. tostring(stackKey))
+    hs.alert.show("New worktree tab: this card isn't a git repo's")
+    return
+  end
+  local editor = FX.tabEditorFor(stackKey)
+  if not editor then
+    hs.alert.show("New worktree tab needs VS Code or Cursor (the Claude extension opens the tab)")
+    return
+  end
+  local branches
+  pcall(function()
+    local q = "'" .. tostring(any.repoKey):gsub("'", "'\\''") .. "'"
+    branches = core.parseBranchList(hs.execute("git --git-dir=" .. q
+      .. " for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null"))
+  end)
+  local req, why = core.newWorktreeTabRequest(spec, {
+    mainRoot = any.mainRoot, branches = branches or {}, worktrees = (FX.repoWorktrees(any.repoKey)),
+    exists = function(p) return hs.fs.attributes(p, "mode") ~= nil end })
+  if not req then
+    print("[cc-dashboard] new-worktree-tab refused (" .. tostring(why) .. ")")
+    hs.alert.show("New worktree tab: " .. tostring(why))
+    return
+  end
+  print("[cc-dashboard] new-worktree-tab: " .. req.branch .. " in " .. tostring(any.mainRoot))
+  FX.openClaudeTab({ root = any.mainRoot, editor = editor, label = any.stackName,
+                     prompt = core.worktreeTabPrompt(req, spec.task) })
 end
 
 -- ---- DR7: A/B fork-to-compare (explicitly-invoked, operator-aware) ------------
@@ -5280,6 +5405,10 @@ local function handleBridgeMsg(msg)
     FX.openWorktree(tostring(payload.v or ""), tostring(payload.text or ""))
     return
   end
+  if a == "new-worktree-tab" then   -- v = stackKey, text = JSON {type, slug, task}; checked in Lua
+    FX.newWorktreeTab(tostring(payload.v or ""), tostring(payload.text or ""))
+    return
+  end
   if a == "open-hidden-view" then
     -- The restore list. Sends only what the row needs to identify a session --
     -- never a prompt body (the panel's audit view owns content, this doesn't).
@@ -6222,6 +6351,12 @@ local function handleBridgeMsg(msg)
         table.insert(menu, 2, { title = (n > 1) and ("Instances (" .. n .. ")…") or "Instances…", fn = function()
             pcall(function() wv:evaluateJavaScript("openInstancesFor(" .. jsString(item.stackKey) .. ")") end)
           end })
+        -- New worktree tab: the Instances view with its form open (a repo card in VS Code/Cursor)
+        if item.repoKey and item.mainRoot and FX.tabEditorFor(item.stackKey) then
+          table.insert(menu, 3, { title = "New worktree tab…", fn = function()
+              pcall(function() wv:evaluateJavaScript("openInstancesFor(" .. jsString(item.stackKey) .. ", true)") end)
+            end })
+        end
       end
       -- Drain (Feature F): finish the in-flight turn, then close. While working/
       -- waiting, arm the in-memory flag; if already idle/done there's no turn to
@@ -7581,6 +7716,20 @@ local HTML = [[
 .in-btn:hover{ border-color:var(--accent); color:var(--text-strong); }
 .in-btn:disabled{ opacity:.5; cursor:default; }
 .in-empty{ padding:12px 6px; color:var(--dim); }
+/* New worktree tab: a header button + a form OUTSIDE #inst-body (re-renders rewrite that) */
+#inst-newtab{ display:none; margin-left:auto; white-space:nowrap; }
+#inst-newtab.show{ display:inline-block; }
+#inst-new{ display:none; padding:8px 12px; border-top:1px solid var(--border); background:var(--surface); }
+#inst-new.show{ display:block; }
+#inst-new .nt-row{ display:flex; align-items:center; gap:6px; }
+#inst-new .nt-types{ display:flex; gap:2px; flex:0 0 auto; }
+#inst-new .nt-type{ font-family:inherit; font-size:11px; padding:2px 7px; border-radius:6px; border:1px solid var(--border); background:var(--surface-2); color:var(--text-3); cursor:pointer; }
+#inst-new .nt-type.on{ border-color:var(--accent); color:var(--text-strong); }
+#nt-slug{ flex:1; min-width:0; font-family:inherit; font-size:12px; padding:3px 6px; border-radius:6px; border:1px solid var(--border); background:var(--surface-2); color:var(--text); }
+#nt-task{ display:block; width:100%; box-sizing:border-box; margin:6px 0; font-family:inherit; font-size:12px; padding:4px 6px; border-radius:6px; border:1px solid var(--border); background:var(--surface-2); color:var(--text); resize:vertical; }
+#inst-new .nt-acts{ justify-content:flex-end; }
+#nt-msg{ flex:1; min-width:0; font-size:11px; color:var(--warn); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#inst-new .nt-go{ border-color:var(--accent); color:var(--text-strong); }
 /* Hidden-sessions rows: name + path, live status chip, and the way back */
 .hv-row{ display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border-weak); }
 .hv-main{ flex:1; min-width:0; }
@@ -8475,8 +8624,16 @@ local HTML = [[
        with no session (Open). Filled by window.ccInstances; rows use data-inact. -->
   <div id="instances" onclick="instBackdrop(event)">
     <div id="inst-card" role="dialog" aria-label="Instances">
-      <div class="ov-head"><span id="inst-title">Instances</span><button class="s-x" onclick="closeInstances()" title="Close (Esc)">✕</button></div>
+      <div class="ov-head"><span id="inst-title">Instances</span><button id="inst-newtab" class="in-btn" onclick="openNewTabForm()" title="Open a new Claude tab in this repo's window that starts its own worktree (.claude/worktrees/). The prompt is typed in for you; nothing is sent until you press Return.">＋ New worktree tab</button><button class="s-x" onclick="closeInstances()" title="Close (Esc)">✕</button></div>
       <div class="ov-body" id="inst-body"></div>
+      <div id="inst-new">
+        <div class="nt-row">
+          <span class="nt-types"><button class="nt-type" data-ntt="feat">feat</button><button class="nt-type" data-ntt="fix">fix</button><button class="nt-type" data-ntt="ui">ui</button><button class="nt-type" data-ntt="docs">docs</button></span>
+          <input id="nt-slug" type="text" maxlength="40" placeholder="name, e.g. login-redirect" autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter'){event.preventDefault();submitNewTab();}">
+        </div>
+        <textarea id="nt-task" rows="2" maxlength="4000" placeholder="What should it do? (optional — the prompt is editable in the tab before you press Return)"></textarea>
+        <div class="nt-row nt-acts"><span id="nt-msg"></span><button class="in-btn" onclick="closeNewTabForm()">Cancel</button><button class="in-btn nt-go" onclick="submitNewTab()">Open tab</button></div>
+      </div>
       <div class="ov-foot"><span id="inst-foot"></span></div>
     </div>
   </div>
@@ -11912,19 +12069,23 @@ local HTML = [[
     // pointer; a re-render also waits for an in-progress press to finish; and keys ride
     // data attributes read by one delegated listener, never interpolated into a handler.
     var INST = { stackKey: null, data: null, sig: null, opening: {}, deferred: false, pressing: false };
-    function openInstancesFor(sk){
+    function openInstancesFor(sk, withNewTab){
       if(!sk) return;
       INST = { stackKey: sk, data: null, sig: null, opening: {}, deferred: false, pressing: false };
       document.getElementById("inst-title").textContent = "Instances";
       document.getElementById("inst-foot").textContent = "";
       document.getElementById("inst-body").innerHTML = '<div class="in-empty">Loading…</div>';
+      document.getElementById("inst-newtab").classList.remove("show");
+      closeNewTabForm();
       document.getElementById("instances").classList.add("show");
       send("open-instances", sk);
+      if(withNewTab) openNewTabForm();   // the card menu's "New worktree tab…"
     }
     function closeInstances(){
       var ov = document.getElementById("instances");
       if(!ov || !ov.classList.contains("show")) return;
       ov.classList.remove("show");
+      closeNewTabForm();
       INST = { stackKey: null, data: null, sig: null, opening: {}, deferred: false, pressing: false };
       send("close-instances");
     }
@@ -11958,6 +12119,7 @@ local HTML = [[
       var sig = tileSignature(p) + "|" + Object.keys(INST.opening).sort().join(",");
       if(!force && sig === INST.sig){ instAges(); return; }
       INST.sig = sig;
+      document.getElementById("inst-newtab").classList.toggle("show", !!p.canNewTab);   // VS Code/Cursor repos only
       document.getElementById("inst-title").textContent = (p.stackName || "Project") + " — instances";
       document.getElementById("inst-foot").textContent = p.mainRoot || "";
       var html = "";
@@ -12041,10 +12203,63 @@ local HTML = [[
       });
       document.addEventListener("keydown", function(e){
         if(e.key !== "Escape") return;
+        var nf = document.getElementById("inst-new");          // an open form closes first
+        if(nf && nf.classList.contains("show")){ closeNewTabForm(); return; }
         var ov = document.getElementById("instances");
         if(ov && ov.classList.contains("show")) closeInstances();
       });
+      var form = document.getElementById("inst-new");
+      if(form) form.addEventListener("click", function(e){
+        var b = e.target && e.target.closest ? e.target.closest("[data-ntt]") : null;
+        if(!b) return;
+        NT.type = b.getAttribute("data-ntt");
+        ntPaintTypes();
+      });
     })();
+    // ---- New worktree tab (2026-09-10): a Claude tab that starts its own worktree ------
+    // Lua opens a new Claude tab in the repo's window with the EnterWorktree prompt typed in
+    // (never sent). The slug rule here mirrors core.newWorktreeTabRequest for instant
+    // feedback -- Lua re-checks everything -- and the request travels as one JSON string.
+    var NT = { type: "fix" };
+    function ntSlug(raw){
+      return String(raw == null ? "" : raw).trim().toLowerCase().replace(/\s+/g, "-");
+    }
+    function ntSlugOk(s){
+      return /^[a-z0-9][a-z0-9._-]{0,39}$/.test(s) && s.indexOf("..") < 0 && !/\.$/.test(s) && !/\.lock$/.test(s);
+    }
+    function ntMessage(stackKey, type, rawSlug, task){
+      var slug = ntSlug(rawSlug);
+      if(!stackKey) return { error: "No project card" };
+      if(["feat","fix","ui","docs"].indexOf(type) < 0) return { error: "Pick a type" };
+      if(!ntSlugOk(slug)) return { error: "Name: lowercase letters, digits, . _ - (up to 40)", slug: slug };
+      return { slug: slug, text: JSON.stringify({ type: type, slug: slug, task: String(task == null ? "" : task).slice(0, 4000) }) };
+    }
+    function ntPaintTypes(){
+      document.querySelectorAll("#inst-new .nt-type").forEach(function(b){
+        b.classList.toggle("on", b.getAttribute("data-ntt") === NT.type);
+      });
+    }
+    function openNewTabForm(){
+      var f = document.getElementById("inst-new"); if(!f) return;
+      f.classList.add("show");
+      document.getElementById("nt-msg").textContent = "";
+      ntPaintTypes();
+      var s = document.getElementById("nt-slug"); if(s) s.focus();
+    }
+    function closeNewTabForm(){
+      var f = document.getElementById("inst-new"); if(!f) return;
+      f.classList.remove("show");
+      document.getElementById("nt-slug").value = "";
+      document.getElementById("nt-task").value = "";
+      document.getElementById("nt-msg").textContent = "";
+    }
+    function submitNewTab(){
+      var m = ntMessage(INST.stackKey, NT.type, document.getElementById("nt-slug").value, document.getElementById("nt-task").value);
+      if(m.slug != null) document.getElementById("nt-slug").value = m.slug;
+      if(m.error){ document.getElementById("nt-msg").textContent = m.error; return; }
+      send("new-worktree-tab", INST.stackKey, m.text);
+      closeNewTabForm();
+    }
     // ---- F9: Features list overlay (plain-language what + why per feature) ----
     function openFeatures(){ send("open-features-view"); document.getElementById("features").classList.add("show"); }
     function closeFeatures(){ document.getElementById("features").classList.remove("show"); }
