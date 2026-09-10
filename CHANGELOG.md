@@ -4,6 +4,23 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — A tab in a worktree shows that worktree
+
+### Fixed — a tab working in .claude/worktrees/<slug> looked like the main checkout
+
+A Claude tab starts in the repo's main checkout and moves into its own worktree with
+`EnterWorktree`. It keeps its launch folder's project key, and stack identity came only from the
+launch folder — so the tab's card and Instances row said **`main`**, Instances listed the tab's
+worktree under "Worktrees with no session" (and **Open** on it would have started a second
+session in a worktree a tab was already editing), and My List never read that worktree's
+`TODO.md`. A session that entered a *sibling* worktree folder fared worse: its cwd isn't under
+its launch folder at all, so it got a card of its own. Now each session's current worktree (the
+first folder holding a `.git` from its cwd up, probed once and cached) supplies its root, branch
+and main-checkout flag whenever it belongs to the same repo, while the card stays the repo's; and
+the launch folder falls back to the folder the session started in (its transcript's first cwd).
+Fixtures: `tests/core.test.lua` and the new behavioral `tests/tab-worktree.test.lua` (both red
+before the fix — the latter caught Open about to spawn into the tab's worktree).
+
 ## 2026-09-10 — A finished Claude tab stays on the panel
 
 ### Fixed — a resting tab was pruned as a /clear ghost while a sibling tab worked

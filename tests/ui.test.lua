@@ -1631,7 +1631,14 @@ do
     check("stacks-pin: tick order -- relabels, stack identity, chat titles, hidden split, ranking",
           iLabels and iAnn and iDup and iPart and iRank
           and iLabels < iAnn and iAnn < iDup and iDup < iPart and iPart < iRank or false)
+    -- 2026-09-10: a session inside a sibling worktree finds its launch folder via its origin
+    local iOrig = src:find("  FX.annotateOrigins(list)", 1, true)
+    check("stacks-pin: origins are stamped before stack identity reads them",
+          iOrig and iAnn and iOrig < iAnn or false)
   end
+  check("stacks-pin: a session's current worktree supplies its branch (tabs in .claude/worktrees/)",
+        src:find("cur = FX.currentWorktree(launch, it.cwd, ident)", 1, true) ~= nil
+        and src:find("core.applyStackIdentity(it, launch or nil, ident, head, labels, cur)", 1, true) ~= nil)
   check("stacks-pin: the Stream Deck still gets one key per session", src:find("sdRender(shownList)", 1, true) ~= nil)
   check("stacks-pin: new state hangs off FX (the main chunk is at the 200-local cap)",
         src:find("^local stackLeads", 1) == nil and src:find("FX._stackLeads", 1, true) ~= nil

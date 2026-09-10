@@ -3517,22 +3517,54 @@ function FX.annotateStacks(list, labels, cfg)
   FX._launchDirN = FX._launchDirN or 0
   if FX._launchDirN > 500 then FX._launchDir, FX._launchDirN = {}, 0 end  -- bounded: cwd drift adds keys
   for _, it in ipairs(list or {}) do
-    local launch, ident, head
+    local launch, ident, head, cur
     if not it.remote then
-      local lk = tostring(it.projectKey or "") .. "|" .. tostring(it.cwd or "")
+      local lk = tostring(it.projectKey or "") .. "|" .. tostring(it.cwd or "") .. "|" .. tostring(it.originDir or "")
       launch = FX._launchDir[lk]
       if launch == nil then
-        launch = core.launchDirFor(it.projectKey, it.cwd) or false
+        launch = core.launchDirFor(it.projectKey, it.cwd, it.originDir) or false
         FX._launchDir[lk] = launch
         FX._launchDirN = FX._launchDirN + 1
       end
       if launch then
         ident = FX.repoIdentity(launch)
-        if ident and ident.toplevel == launch then head = FX.headFor(ident.gitDir) end
+        if ident and ident.toplevel == launch then
+          head = FX.headFor(ident.gitDir)
+          cur = FX.currentWorktree(launch, it.cwd, ident)
+        end
       end
     end
-    core.applyStackIdentity(it, launch or nil, ident, head, labels)
+    core.applyStackIdentity(it, launch or nil, ident, head, labels, cur)
   end
+end
+
+-- The worktree a stacked session is working in NOW, when that isn't its launch folder: a
+-- tab that EnterWorktree'd into .claude/worktrees/<slug> (or a driver session that
+-- entered a sibling folder) keeps its launch folder's projectKey, so without this its
+-- card said `main` and Instances offered its worktree to Open. Walks cwd up to the first
+-- folder holding a `.git` (core.worktreeRootCandidates), probes that folder once
+-- (FX.repoIdentity caches), and returns { ident, head } only for the same repo. The
+-- walk is cached per launch|cwd (a miss retried after 60s) in a bounded table.
+function FX.currentWorktree(launch, cwd, launchIdent)
+  if type(cwd) ~= "string" or core.normDir(cwd) == launch then return nil end
+  FX._curWt = FX._curWt or {}
+  FX._curWtN = FX._curWtN or 0
+  if FX._curWtN > 500 then FX._curWt, FX._curWtN = {}, 0 end
+  local ck, now = launch .. "|" .. cwd, FX.now()
+  local c = FX._curWt[ck]
+  if not c or (not c.root and now - c.at >= 60) then
+    local root = false
+    for _, dir in ipairs(core.worktreeRootCandidates(launch, cwd, os.getenv("HOME"))) do
+      if hs.fs.attributes(dir .. "/.git", "mode") then root = dir; break end
+    end
+    if not c then FX._curWtN = FX._curWtN + 1 end
+    c = { root = root, at = now }
+    FX._curWt[ck] = c
+  end
+  if not c.root then return nil end
+  local id = FX.repoIdentity(c.root)
+  if not (id and id.toplevel == c.root and launchIdent and id.commonDir == launchIdent.commonDir) then return nil end
+  return { ident = id, head = FX.headFor(id.gitDir) }
 end
 
 -- When did a jump last LAND on each session (core.handleAction calls fx.markSeen)? A
@@ -15433,9 +15465,10 @@ function FX._refreshBody()
   end
   -- Project stacks (2026-09-10): which repo + worktree each session belongs to, so a
   -- repo's main checkout and its worktrees share one card. After the relabels (a repo
-  -- card takes its main checkout's relabel); hidden sessions included.
-  FX.annotateStacks(list, labels, cfg)
+  -- card takes its main checkout's relabel); hidden sessions included. Origins first: a
+  -- session that entered a sibling worktree finds its launch folder through its origin.
   FX.annotateOrigins(list)   -- the window each session lives in (see FX.annotateOrigins)
+  FX.annotateStacks(list, labels, cfg)
   -- Two sessions in ONE project used to render as IDENTICAL cards: the name (and
   -- any relabel) is per-projectKey, so nothing on either tile said which chat it
   -- was. Give each of those tiles its own chat title -- and only those, so a

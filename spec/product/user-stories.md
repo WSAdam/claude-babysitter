@@ -38,6 +38,7 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want a folder nested inside a repo that isn't its own repo (a scratch folder) to keep its own card, so that unrelated work isn't folded into the project that happens to contain it.
 - As a **developer**, I want the detail panel to stay on the instance I selected even when its card starts showing a different one, so that a nudge I'm typing never goes to the wrong worktree.
 - As a **fleet operator**, I want to switch project cards off (`stacks.enabled`) and get one card per session back, so that I can fall back if folding ever gets in my way.
+- As a **fleet operator**, I want a Claude tab that moved into its own worktree to show that worktree's branch on the project card and in Instances, so that I can tell my tabs apart and never reopen a worktree a tab is already working in.
 
 ## Session observability
 

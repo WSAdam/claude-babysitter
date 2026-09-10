@@ -144,9 +144,10 @@ Claude Code hooks ──► cc-status.sh ──► ~/.claude/cc-status/<session_
 
 ## Project cards & instances
 
-Built for the parallel-worktree workflow (one unit of work = one branch = one sibling
-worktree folder = one VS Code window = one Claude session): the grid shows **one card per
-project**, not one per session.
+Built for the parallel-worktree workflow (one unit of work = one branch = one worktree = one
+Claude session — by default a Claude tab in the repo's window working in
+`.claude/worktrees/<slug>`, or a sibling worktree in its own window): the grid shows **one card
+per project**, not one per session.
 
 - **What folds together.** A session launched at a git worktree top-level joins its repo's
   card — the main checkout and every linked worktree (`../repo-fix-y`, or `canna-fresh` for
@@ -154,6 +155,10 @@ project**, not one per session.
   `git rev-parse` per launch folder). Two sessions in one plain folder share a card too. A
   folder nested inside a repo that isn't its own repo (a scratch folder) keeps its own card,
   and A/B fork-to-compare variants keep theirs so the comparison stays visible.
+- **Tabs that entered a worktree.** A tab that started in the main checkout and ran
+  `EnterWorktree` (into `.claude/worktrees/<slug>`, or into a sibling folder) stays on the
+  repo's card but shows the worktree **it is working in** — its branch, its folder in
+  Instances (never offered to Open while it's there) and its `TODO.md` in My List.
 - **What the card shows.** The instance that most needs you — blocked longest first
   (approval or question, then error, then stalled), then the newest *finished* one you haven't
   jumped to yet, else the most recently active — with its branch chip and an

@@ -633,18 +633,53 @@ end
 -- The session's LAUNCH folder: the first of cwd and its ancestors whose Claude
 -- project-dir name equals projectKey (cwd drifts as the agent cd's; the key never
 -- does). A path-valued key (no transcript, so projectKey fell back to cwd) is already
--- the folder. nil when nothing matches.
-function M.launchDirFor(projectKey, cwd)
+-- the folder. When the walk finds nothing -- a session that EnterWorktree'd into a
+-- SIBLING worktree folder has no ancestor under its launch folder -- the folder it
+-- started in (`origin`, the transcript's first cwd) counts if it encodes to the key.
+-- nil when nothing matches.
+function M.launchDirFor(projectKey, cwd, origin)
   if type(projectKey) ~= "string" or projectKey == "" then return nil end
   if projectKey:sub(1, 1) == "/" then return M.normDir(projectKey) end
-  if type(cwd) ~= "string" or cwd:sub(1, 1) ~= "/" then return nil end
-  local dir = M.normDir(cwd)
-  while true do
-    if M.encodeProjectPath(dir) == projectKey then return dir end
-    if dir == "/" then return nil end
-    dir = dir:match("^(.*)/[^/]+$") or ""
-    if dir == "" then dir = "/" end
+  if type(cwd) == "string" and cwd:sub(1, 1) == "/" then
+    local dir = M.normDir(cwd)
+    while true do
+      if M.encodeProjectPath(dir) == projectKey then return dir end
+      if dir == "/" then break end
+      dir = dir:match("^(.*)/[^/]+$") or ""
+      if dir == "" then dir = "/" end
+    end
   end
+  if type(origin) == "string" and origin:sub(1, 1) == "/" then
+    local o = M.normDir(origin)
+    if M.encodeProjectPath(o) == projectKey then return o end
+  end
+  return nil
+end
+
+-- Where a session's CURRENT worktree could be rooted: cwd and its ancestors, deepest
+-- first -- the dashboard stats each for a `.git` entry and takes the first. Inside the
+-- launch folder (a tab in <launch>/.claude/worktrees/<slug>, whose name may itself hold
+-- a "/") the walk stops short of the launch folder, whose identity is already known;
+-- outside it (a sibling worktree) it takes at most 8 levels and never reaches `home` or
+-- "/". Pure.
+function M.worktreeRootCandidates(launchDir, cwd, home)
+  local out = {}
+  if type(cwd) ~= "string" or cwd:sub(1, 1) ~= "/" then return out end
+  local dir = M.normDir(cwd)
+  local launch = type(launchDir) == "string" and launchDir ~= "" and M.normDir(launchDir) or nil
+  if launch and dir == launch then return out end
+  local inside = launch ~= nil and launch ~= "/" and dir:sub(1, #launch + 1) == launch .. "/"
+  local stopAt = type(home) == "string" and home ~= "" and M.normDir(home) or nil
+  while dir ~= "/" and dir ~= "" do
+    if inside then
+      if dir == launch then break end
+    else
+      if dir == stopAt or #out >= 8 then break end
+    end
+    out[#out + 1] = dir
+    dir = dir:match("^(.*)/[^/]+$") or ""
+  end
+  return out
 end
 
 -- The one git probe per launch folder (FX caches it): top-level, common dir, git dir.
@@ -685,7 +720,12 @@ end
 -- own repo (Scratch-pad inside this repo) keeps its own card, as do A/B fork-to-compare
 -- variants (under /.cc-ab/: folding them would hide the comparison) and remote tiles.
 -- Everything else stacks by projectKey, so two sessions in one folder still share a card.
-function M.applyStackIdentity(it, launchDir, ident, head, labels)
+-- `cur` ({ ident, head }, optional) is the worktree the session is working in NOW when
+-- that differs from its launch folder -- a tab that EnterWorktree'd into
+-- .claude/worktrees/<slug>, or into a sibling folder. When it belongs to the same repo it
+-- supplies the root, branch and main-checkout flag; the card is still the launch
+-- folder's repo.
+function M.applyStackIdentity(it, launchDir, ident, head, labels, cur)
   if type(it) ~= "table" then return it end
   it.repoKey, it.wtRoot, it.mainRoot, it.branch, it.detached, it.isMainWt = nil, nil, nil, nil, nil, nil
   local own = (type(it.label) == "string" and it.label ~= "" and it.label) or it.autoTitle or it.name
@@ -703,12 +743,17 @@ function M.applyStackIdentity(it, launchDir, ident, head, labels)
     return it
   end
   it.repoKey = ident.commonDir
-  it.wtRoot = ident.toplevel
   it.mainRoot = M.repoMainRoot(ident.commonDir)
-  it.isMainWt = (it.mainRoot ~= nil and it.mainRoot == ident.toplevel)
-  if type(head) == "table" then
-    it.branch = head.branch or head.detached
-    it.detached = head.detached and true or nil
+  local here, hereHead = ident, head
+  if type(cur) == "table" and type(cur.ident) == "table" and cur.ident.commonDir == ident.commonDir
+     and type(cur.ident.toplevel) == "string" and cur.ident.toplevel ~= ident.toplevel then
+    here, hereHead = cur.ident, cur.head
+  end
+  it.wtRoot = here.toplevel
+  it.isMainWt = (it.mainRoot ~= nil and it.mainRoot == here.toplevel)
+  if type(hereHead) == "table" then
+    it.branch = hereHead.branch or hereHead.detached
+    it.detached = hereHead.detached and true or nil
   end
   it.stackKey = "repo:" .. ident.commonDir
   local mainKey = it.mainRoot and M.encodeProjectPath(it.mainRoot)

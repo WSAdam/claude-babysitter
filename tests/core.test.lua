@@ -8284,6 +8284,52 @@ do
   eq("stack: two sessions in one plain folder share a card", plainA.stackKey, plainB.stackKey)
 end
 
+-- ---- Project stacks: a session working in another worktree (2026-09-10) -----
+do
+  -- 2026-09-10: a tab that EnterWorktree'd into .claude/worktrees/<slug> took its identity
+  -- from its launch folder, so its card said `main` and Instances offered its worktree to Open.
+  local M0 = "/r/main"
+  local pk = core.encodeProjectPath(M0)
+  eq("launchDir: a session that moved into a sibling worktree falls back to its origin folder",
+     core.launchDirFor(pk, "/r/main-fix", M0), M0)
+  eq("launchDir: an origin that doesn't encode to the key is ignored",
+     core.launchDirFor(pk, "/r/main-fix", "/elsewhere"), nil)
+  eq("launchDir: the cwd walk still wins over the origin", core.launchDirFor(pk, M0 .. "/src", "/elsewhere"), M0)
+
+  local inside = core.worktreeRootCandidates(M0, M0 .. "/.claude/worktrees/fix/t/src", "/Users/adam")
+  eq("candidates: inside the launch folder, deepest first", inside[1], M0 .. "/.claude/worktrees/fix/t/src")
+  eq("candidates: ...up to but never including the launch folder", inside[#inside], M0 .. "/.claude")
+  eq("candidates: the launch folder itself has none", #core.worktreeRootCandidates(M0, M0, "/Users/adam"), 0)
+  local outside = core.worktreeRootCandidates("/Users/adam/p", "/Users/adam/p-fix/src", "/Users/adam")
+  eq("candidates: outside the launch folder, the cwd first", outside[1], "/Users/adam/p-fix/src")
+  eq("candidates: ...never reaching home or above", outside[#outside], "/Users/adam/p-fix")
+  eq("candidates: at most 8 levels outside the launch folder",
+     #core.worktreeRootCandidates("/x/p", "/a/b/c/d/e/f/g/h/i/j/k", nil), 8)
+  eq("candidates: a relative cwd has none", #core.worktreeRootCandidates(M0, "rel/dir", "/h"), 0)
+
+  local mainId = { toplevel = M0, commonDir = M0 .. "/.git", gitDir = M0 .. "/.git" }
+  local tabRoot = M0 .. "/.claude/worktrees/t"
+  local tabId = { toplevel = tabRoot, commonDir = M0 .. "/.git", gitDir = M0 .. "/.git/worktrees/t" }
+  local tab = core.applyStackIdentity({ key = "t", name = "t", cwd = tabRoot, projectKey = pk },
+    M0, mainId, { branch = "main" }, {}, { ident = tabId, head = { branch = "fix/t" } })
+  eq("tab: stays on its repo's card", tab.stackKey, "repo:" .. M0 .. "/.git")
+  eq("tab: shows its worktree's branch, not main's", tab.branch, "fix/t")
+  eq("tab: its root is the worktree it works in", tab.wtRoot, tabRoot)
+  eq("tab: it isn't the main checkout", tab.isMainWt, false)
+  eq("tab: the card is still named for the repo", tab.stackName, "main")
+  local nested = core.applyStackIdentity({ key = "n", name = "main", cwd = M0 .. "/vendor/lib", projectKey = pk },
+    M0, mainId, { branch = "main" }, {},
+    { ident = { toplevel = M0 .. "/vendor/lib", commonDir = M0 .. "/vendor/lib/.git", gitDir = M0 .. "/vendor/lib/.git" },
+      head = { branch = "lib-main" } })
+  eq("tab: a nested repo of its own is ignored (another common dir)", nested.branch, "main")
+  eq("tab: ...so the session keeps its launch folder's root", nested.wtRoot, M0)
+
+  local p = core.instancesPayload(tab.stackKey, { tab }, {}, { { path = M0 }, { path = tabRoot } }, { mainRoot = M0 })
+  local idleTab = false
+  for _, w in ipairs(p.worktrees) do if w.path == tabRoot then idleTab = true end end
+  eq("tab: Instances never lists the worktree a tab works in as idle", idleTab, false)
+end
+
 -- ---- Project stacks: which instance leads a card (2026-09-10) ---------------
 -- The card shows -- and double-click jumps to -- the instance that most needs you:
 -- blocked (approval > error > hung, longest-waiting first), then a finished one you

@@ -77,6 +77,9 @@ echo ""
 echo "== lua: My List -- one tab per project across worktrees (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/worklist-worktrees.test.lua" || fail=1
 echo ""
+echo "== lua: a session working in another worktree (behavioral, stubbed hs + git) =="
+HOME="$(mktemp -d)" lua "$DIR/tab-worktree.test.lua" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"
