@@ -3063,5 +3063,48 @@ do
   end
 end
 
+-- ---- Shared windows: the keystroke guard is wired everywhere (2026-09-10) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local function body(sig, len) local i = src:find(sig, 1, true); return i and src:sub(i, i + (len or 1600)) or "" end
+
+  check("sharedwin-pin: the tick stamps the shared count from the whole local list, behind its switch",
+        src:find('(core.config(cfg, "keystrokes.refuseSharedWindow", true) ~= false)', 1, true) ~= nil
+        and src:find("and core.sharedWindowCounts(list) or {}", 1, true) ~= nil
+        and src:find("it.sharedWindow = sw[it.key]", 1, true) ~= nil)
+  check("sharedwin-pin: every target comes from FX.targetFor (the shared count rides along)",
+        src:find("local function winTarget(it) return FX.targetFor(it) end", 1, true) ~= nil
+        and body("function FX.targetFor(it)", 400):find("shared = it.sharedWindow", 1, true) ~= nil
+        and body("function FX.runImprove(item)", 3000):find("local target = FX.targetFor(item)", 1, true) ~= nil
+        and body("function FX.abKeep(", 1200):find("local target = FX.targetFor(tile)", 1, true) ~= nil)
+  do
+    local s = body("local function sendToWindow(target, sendFn)", 600)
+    check("sharedwin-pin: sendToWindow (Stop, key approvals, Close) refuses before focusing",
+          s:find('if FX.refuseShared(target, "keys") then return false end', 1, true) ~= nil
+          and s:find('if FX.refuseShared', 1, true) < (s:find("focusProject(", 1, true) or 0))
+    local p = body("function FX.pasteIntoWindow(target, payload)", 3200)
+    local iKitty, iRefuse, iClip = p:find("if isKitty(target) then", 1, true),
+      p:find('if FX.refuseShared(target, "paste") then return false end', 1, true), p:find("local prevClip", 1, true)
+    check("sharedwin-pin: pasteIntoWindow refuses after its kitty branch, before any focus or clipboard change",
+          iKitty and iRefuse and iClip and iKitty < iRefuse and iRefuse < iClip or false)
+    local k = body("function FX.sendKeys(target, keys)", 2400)
+    local jKitty, jRefuse, jFocus = k:find("if isKitty(target) then", 1, true),
+      k:find('if FX.refuseShared(target, "keys") then return false end', 1, true), k:find("focusProject(", 1, true)
+    check("sharedwin-pin: sendKeys refuses after its kitty branch, before focusing",
+          jKitty and jRefuse and jFocus and jKitty < jRefuse and jRefuse < jFocus or false)
+  end
+  check("sharedwin-pin: auto-feed, auto-continue and self-summary skip a shared window up front",
+        src:find("and not core.keystrokeBlocked(it)\n       and core.shouldFeed(", 1, true) ~= nil
+        and src:find("enabled = autoContinueOn and not it.remote and not core.keystrokeBlocked(it)", 1, true) ~= nil
+        and src:find("{ enabled = not core.keystrokeBlocked(it), prevStatus = pv and pv.status or nil }", 1, true) ~= nil)
+  local d = body("function renderDetail(){", 6000)
+  check("sharedwin-pin: the detail panel greys the keystroke controls and says why",
+        d:find('var SHARED_IDS = ["b-stop","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind","effort","mode","d-model"];', 1, true) ~= nil
+        and d:find('document.getElementById("d-shared")', 1, true) ~= nil
+        and src:find('<div id="d-shared"></div>', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

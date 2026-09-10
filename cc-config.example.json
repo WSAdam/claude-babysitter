@@ -139,6 +139,11 @@
     "enabled": true
   },
 
+  "keystrokes": {
+    "_comment": "Shared-window guard (ON by default). Several Claude sessions running as tabs in one VS Code/Cursor window share that window, and Shepherd types into the WINDOW -- whichever tab is in front gets the keys. So a session whose window hosts others gets no keystroke action at all: no nudge, queue feed, auto-continue, /clear, /rc, set-mode or close (close would be the whole window). Jump and hands-free (gate) approvals still work; kitty is unaffected. false = type into shared windows anyway.",
+    "refuseSharedWindow": true
+  },
+
   "drain": {
     "_comment": "Graceful drain (Feature F). OFF by default. Adds a right-click 'Drain (finish turn, then close)' action: instead of closing immediately, it waits for the session to finish the in-flight turn (next done) and then closes. If the session is already idle/done it closes now. Drain wins over queue auto-feed for the same session.",
     "enabled": false

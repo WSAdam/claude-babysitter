@@ -4,6 +4,33 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — No keystrokes into a window shared by several sessions
+
+### Added — the shared-window guard
+
+With several Claude tabs in one VS Code window (the default way to run parallel worktrees now),
+Shepherd could no longer be sure where its keys went: it focuses the session's **window**, then
+⌘1/⌘Esc into whichever Claude tab the extension last used. A nudge, a queued task, "continue",
+a `/clear` or a Stop meant for one tab could land in another, and Close (⌘⇧W) would close every
+session in the window. Now each tick counts the sessions on every window (`host_window`, the
+window's extension host — the whole local list, hidden sessions included) and a session whose
+window hosts others gets no keystroke action: `core.handleAction` refuses it before any effect,
+the effect chokepoints (`sendToWindow`, `pasteIntoWindow`, `sendKeys`) refuse it for the direct
+paths, and the automatic senders — auto-feed, the queue router, auto-continue, self-summary and
+the `/rc` startup sweep — skip it up front instead of retrying every tick. Jump, hands-free gate
+approvals, Queue add, Gate and Policy keep working; kitty is unaffected. Each refusal is logged,
+with an alert at most once a minute per session, and the detail panel greys the keystroke
+controls with a one-line explanation. `keystrokes.refuseSharedWindow: false` turns it off.
+Fixtures: `tests/core.test.lua`, source pins in `tests/ui.test.lua`, and the new behavioral
+`tests/shared-window.test.lua` (a fake VS Code window per folder; no focus and no keystroke for
+the pair, the lone session still typed into).
+
+### Fixed — Improve and A/B keep missed the window a session started in
+
+Both built their window target inline, without the origin folder the other keystroke paths use
+to find a session that EnterWorktree'd away from its launch folder. Every target now comes from
+one builder, `FX.targetFor`, which also carries the shared-window count.
+
 ## 2026-09-10 — A tab in a worktree shows that worktree
 
 ### Fixed — a tab working in .claude/worktrees/<slug> looked like the main checkout

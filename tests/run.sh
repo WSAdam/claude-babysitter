@@ -80,6 +80,9 @@ echo ""
 echo "== lua: a session working in another worktree (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/tab-worktree.test.lua" || fail=1
 echo ""
+echo "== lua: no keystrokes into a window shared by several sessions (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/shared-window.test.lua" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

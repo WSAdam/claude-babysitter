@@ -36,6 +36,7 @@ local function newRecorder()
     pasteIntoWindow = function(t, payload) recWin("pasteIntoWindow", t, payload); return r._pasteResult end,
     closeWindow     = function(t) recWin("closeWindow", t) end,
     sendKeys        = function(t, keys) recWin("sendKeys", t, keys); return r._sendKeysResult end,
+    refuseShared    = function(item, action) rec("refuseShared", (item or {}).key, action) end,
     removeStatus    = function(key) rec("removeStatus", key) end,
     saveGeometry    = function(frame) rec("saveGeometry", frame) end,
     loadGeometry    = function() rec("loadGeometry"); return r._geometry end,

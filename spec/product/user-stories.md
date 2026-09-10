@@ -67,6 +67,7 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **developer**, I want to switch a running session's model live from a Model dropdown reflecting what's actually running, so that I can change models mid-task without a fresh session.
 - As a **developer**, I want Clear and Compact buttons with a confirm, so that I can reset or shrink a session's context safely from the panel.
 - As a **fleet operator**, I want an Improve action that sends this repo's un-applied leaderboard insights to a session as a review-first prompt, so that I can fold in suggested improvements without blind wholesale edits.
+- As a **developer**, I want Shepherd to refuse, and say why, any keystroke action for a session whose VS Code window holds other Claude sessions, so that a nudge, queued task or close meant for one tab never lands in another.
 - As a **developer**, I want the Wants and Why lines clamped to two lines but click-to-expand, so that I can scan many tiles yet still read the full reasoning when I care.
 
 ## Headless approvals (the gate)

@@ -111,6 +111,12 @@ Two delivery paths, and which one a session uses determines reliability. **[DECI
 Each session **self-reports its editor** (`cc-status.sh` reads the env it inherits from `claude`),
 so the panel routes effects per session: Kitty → headless, everything else → focus-and-type.
 
+Focus-and-type reaches a **window**, not a tab. When several Claude sessions run as tabs in one
+VS Code/Cursor window (they share its extension host, `host_window`), the keys go to whichever tab
+is in front — so a session in a shared window gets **no keystroke effect**: Shepherd refuses and
+says why rather than risk the wrong tab, and the automatic senders skip it. Jump and headless
+approvals are unaffected; `keystrokes.refuseSharedWindow` turns the guard off. **[DECISION D-12]**
+
 ## 6. Observability (local, derived, zero extra hooks)
 
 All from the transcript Shepherd already tails — **no extra hooks, no model tokens**:

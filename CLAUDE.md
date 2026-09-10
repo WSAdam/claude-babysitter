@@ -53,6 +53,9 @@ and the README's "Testing & development" section.
 - One VS Code window hosts many sessions: every Claude tab in it shares `host_window` (the
   extension-host pid), while `session_pid` is per session and survives `/clear`. Never
   read a shared `host_window` as "the same session".
+- Keystrokes go to a window, not a tab: effects refuse a session whose window hosts others
+  (`it.sharedWindow`, `core.keystrokeBlocked`). Build every target with `FX.targetFor(it)`,
+  and make a new automatic sender skip blocked sessions up front so it can't retry every tick.
 - When live behaviour contradicts the code, dump the running state with `hs -c` before
   theorising (and compare the Hammerspoon process start time with the deployed files).
 

@@ -7903,7 +7903,8 @@ do
   local newCount = 0; for _, f in ipairs(core.FEATURES) do if f.new then newCount = newCount + 1 end end
   -- 2026-08-31: 6 -> 7 when the worklist gained the TODO.md import (re-flagged new).
   -- 2026-09-10: 7 -> 8 for project cards & instances ("stacks", flagged new).
-  eq("FEATURES: the 8 new features are flagged", newCount, 8)
+  -- 2026-09-10: 8 -> 9 for the shared-window keystroke guard ("sharedwin", flagged new).
+  eq("FEATURES: the 9 new features are flagged", newCount, 9)
 end
 
 -- F4: transcript peek (user + assistant rows, chronological, noise filtered)
@@ -8535,6 +8536,68 @@ do
      table.concat(rs, ","), "/r/main*,/r/main-fix")
   eq("rootList: offline (git not listed), recorded roots are kept",
      #rootList("/r/main", {}, {}, { { root = "/r/main", isMain = true }, { root = "/r/old" } }, false), 2)
+end
+
+-- ---- Shared windows: keystrokes go to a window, not a tab (2026-09-10) ------
+-- Every Claude tab in one VS Code window shares its extension host (host_window), and
+-- Shepherd types into the WINDOW: whichever tab is in front gets the keys. So a session
+-- whose window hosts others gets no keystroke actions at all -- Jump and the gate's
+-- hands-free decision file still work.
+do
+  local function vs(k, hw, extra)
+    local t = { key = k, name = k, cwd = "/r/" .. k, editor = "vscode", status = "done", host_window = hw }
+    for a, b in pairs(extra or {}) do t[a] = b end
+    return t
+  end
+  local counts = core.sharedWindowCounts({
+    vs("a", "100"), vs("b", "100"), vs("c", "200"),
+    vs("h", "100", { hidden = true }),               -- hidden from the grid, still a tab there
+    vs("k", "100", { editor = "kitty" }),             -- kitty targets its own windows
+    vs("r", "100", { remote = { host = "box" } }),
+    vs("n", nil), vs("e", ""),
+  })
+  eq("shared: tabs on one host count every session there (the hidden one too)", counts.a, 3)
+  eq("shared: ...so the hidden tab is shared as well", counts.h, 3)
+  eq("shared: a session alone in its window isn't shared", counts.c, nil)
+  eq("shared: kitty never counts", counts.k, nil)
+  eq("shared: a remote tile never counts", counts.r, nil)
+  eq("shared: no host id is unknown, never shared", counts.n, nil)
+  eq("shared: an empty host id is unknown too", counts.e, nil)
+
+  check("blocked: a session in a shared window", core.keystrokeBlocked(vs("a", "100", { sharedWindow = 2 })))
+  check("blocked: a lone session is not", not core.keystrokeBlocked(vs("c", "200")))
+  check("blocked: kitty never is (it targets its own window)",
+        not core.keystrokeBlocked(vs("k", "1", { editor = "kitty", sharedWindow = 2 })))
+
+  local shared = vs("s", "100", { sharedWindow = 2, status = "working" })
+  for _, a in ipairs({ { "nudge", "hi" }, { "stop" }, { "close" }, { "continue" }, { "effort", "high" },
+                       { "model", "claude-sonnet-4-6" }, { "set-mode", "plan" }, { "approve" }, { "deny" } }) do
+    local r = newRecorder()
+    local refused = {}
+    r.fx.refuseShared = function(_, action) refused[#refused + 1] = action end
+    local out = core.handleAction(r.fx, shared, a[1], a[2])
+    local touched = false
+    for _, c in ipairs(r.calls) do if c.op ~= "log" then touched = true end end
+    check("guard: " .. a[1] .. " on a shared-window session is refused before any effect",
+          out == nil and not touched and refused[1] == a[1])
+  end
+  local r = newRecorder()
+  eq("guard: Jump still works", core.handleAction(r.fx, shared, "focus"), "focus")
+  r = newRecorder()
+  local waiting = vs("w", "100", { sharedWindow = 2, status = "approval", gate = "waiting" })
+  eq("guard: a hands-free approve still works", core.handleAction(r.fx, waiting, "approve"), "approve")
+  eq("guard: ...through the decision file, no keystroke", r.last().op, "writeDecision")
+  r = newRecorder()
+  core.handleAction(r.fx, vs("c", "200", { status = "working" }), "stop")
+  eq("guard: a lone session still gets its keystroke", r.last().op, "actOnWindow")
+  eq("guard: ...and its target names the session", r.last().tgt and r.last().tgt.key, "c")
+
+  check("guard: the router never picks a shared-window session", not core.sessionFree(vs("s", "100", { sharedWindow = 2 })))
+  check("guard: ...a lone finished session is still free", core.sessionFree(vs("c", "200")))
+  local sweep = core.remoteControlSweepTargets({ vs("s", "100", { sharedWindow = 2, session_id = "s" }),
+                                                 vs("c", "200", { session_id = "c" }) })
+  eq("guard: the /rc startup sweep skips shared-window sessions", #sweep, 1)
+  eq("guard: ...and still reaches the lone one", sweep[1] and sweep[1].key, "c")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

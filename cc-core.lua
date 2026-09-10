@@ -212,6 +212,44 @@ local function gatedDecision(fx, item, tgt, verb, keyConst)
   end
 end
 
+-- ---- Shared windows (2026-09-10) ---------------------------------------------
+-- Every Claude tab in one VS Code/Cursor window shares that window's extension host
+-- (host_window), and Shepherd types into a WINDOW -- focus it, then ⌘1/⌘Esc into
+-- whichever Claude tab the extension last used. With several sessions in one window a
+-- keystroke meant for one lands in another, so those sessions get no keystroke actions.
+local function windowHostOf(it)
+  if type(it) ~= "table" or it.remote or it.editor == "kitty" then return nil end
+  local hw = it.host_window
+  if hw == nil or tostring(hw) == "" then return nil end
+  return tostring(hw)
+end
+
+-- key -> how many sessions share that session's window, for sessions whose window hosts
+-- more than one. Pass the whole local list, hidden and stale sessions included -- a
+-- hidden tab is still a tab in that window. Kitty (own windows), remote tiles and
+-- sessions with no host id never count. Pure.
+function M.sharedWindowCounts(list)
+  local n = {}
+  for _, it in ipairs(list or {}) do
+    local hw = windowHostOf(it)
+    if hw then n[hw] = (n[hw] or 0) + 1 end
+  end
+  local out = {}
+  for _, it in ipairs(list or {}) do
+    local hw = windowHostOf(it)
+    if hw and n[hw] > 1 and it.key ~= nil then out[it.key] = n[hw] end
+  end
+  return out
+end
+
+-- May Shepherd type into this session's window? Not when it hosts other sessions (the
+-- dashboard stamps item.sharedWindow from sharedWindowCounts, or leaves it nil when
+-- keystrokes.refuseSharedWindow is off). Kitty and remote tiles are never blocked here.
+function M.keystrokeBlocked(item)
+  return type(item) == "table" and not item.remote and item.editor ~= "kitty"
+     and (tonumber(item.sharedWindow) or 0) > 1
+end
+
 -- Perform an action on a session via the injected fx (the only side effects).
 -- Returns the action actually taken (handy for tests/logging).
 function M.handleAction(fx, item, action, text)
@@ -225,13 +263,24 @@ function M.handleAction(fx, item, action, text)
   -- below) may proceed for a remote tile. This single chokepoint covers all callers,
   -- matching the R1-26 comment's claim and actionIsHeadless / remoteActionAllowed.
   if item.remote and action ~= "approve" and action ~= "deny" then return nil end
+  -- Shared windows (2026-09-10): a session whose window hosts others gets no keystroke
+  -- action at all -- refused here, before any effect, so a Close never drops the card of
+  -- a window it didn't close. Jump (focus, and answer's jump fallback) and headless
+  -- actions (the gate's decision file) still go through.
+  if M.keystrokeBlocked(item) and action ~= "focus" and action ~= "answer"
+     and not M.actionIsHeadless(item, action) then
+    if fx.refuseShared then fx.refuseShared(item, action) end
+    return nil
+  end
   -- The window effects route per editor (Part A), so they need more than the
   -- name: a compact target carries the kitty targeting data too. Key-based
   -- effects (writeDecision/removeStatus) stay headless regardless of editor.
+  -- Same shape as the dashboard's FX.targetFor.
   local tgt = {
-    name = item.name, cwd = item.cwd, editor = item.editor,
+    key = item.key, name = item.name, cwd = item.cwd, editor = item.editor,
     kittyWindowId = item.kitty_window_id, kittyListenOn = item.kitty_listen_on,
     origin = item.originDir,   -- the folder it started in: the window it lives in (pickWindow)
+    shared = item.sharedWindow,
   }
   if action == "focus" then
     -- A jump that landed marks the instance seen: a finished one stops leading its
@@ -4073,6 +4122,9 @@ function M.sessionFree(item, opts)
   if type(item) ~= "table" then return false end
   if item.status ~= "done" then return false end
   if item.remote then return false end
+  -- a routed feed is a paste: never into a window shared with other sessions (the
+  -- level-triggered router would otherwise re-pick it, and be refused, every tick)
+  if M.keystrokeBlocked(item) then return false end
   if opts.draining then return false end
   if opts.pending ~= nil then
     local expired = ((tonumber(opts.now) or 0) - (tonumber(opts.pending) or 0))
@@ -4550,6 +4602,7 @@ function M.remoteControlSweepTargets(list)
     if it and not it.remote and not it.stale
        and (it.status == "idle" or it.status == "done")
        and it.session_id ~= nil and tostring(it.session_id) ~= ""
+       and not M.keystrokeBlocked(it)   -- /rc is typed: never into a shared window
        -- RC needs claude.ai auth and rejects gateway/third-party providers, so /rc would
        -- just error in a gateway session -- skip those (a base_url marks a gateway tile).
        and M.isAnthropicSession(it.model, it.base_url) then
@@ -10683,6 +10736,9 @@ M.FEATURES = {
   { key = "actions", cat = "Control", title = "Jump, nudge, stop, clear",
     what = "Act on any session from its tile — focus its window, send it a message, stop it, or clear its context.",
     why = "Drive a session without switching to it." },
+  { key = "sharedwin", cat = "Control", new = true, title = "Shared-window guard",
+    what = "When several Claude sessions run as tabs in one VS Code window, Shepherd won't type into any of them — no nudge, queue feed, /clear or close — and says why. Jump and hands-free approvals still work. keystrokes.refuseSharedWindow switches it off.",
+    why = "Shepherd types into a window, not a tab, so a message meant for one tab could land in another." },
   { key = "transcript", cat = "Control", new = true, title = "Transcript peek",
     what = "Read a session's recent back-and-forth, with a search box, right inside the panel.",
     why = "Triage what a session is actually doing in a glance instead of switching windows." },

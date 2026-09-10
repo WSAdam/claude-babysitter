@@ -191,6 +191,18 @@ ledger** overlays (see "Audit log & insights"), the **⚙ Settings** panel, and 
 tile to **jump** straight to its window — on a project card, to the instance that needs
 you most (see "Project cards & instances"). Both are decided the moment the button goes
 down, so they land even while a busy fleet is re-rendering the grid under the pointer.
+
+**Sessions that share a window.** Shepherd acts on a VS Code/Cursor session by focusing its
+*window* and typing — and when several Claude tabs run in one window, the keys land in
+whichever tab is in front. So a session whose window hosts other sessions gets **no keystroke
+action at all**: no nudge, queue feed, routed task, auto-continue, `/clear`, `/compact`,
+`/rc`, Rewind, model/effort/mode switch, key approval or Close (Close would be the whole
+window). Each refusal is logged and raises an alert (at most once a minute per session); the
+detail panel greys those controls and says how many sessions share the window. **Jump**,
+**hands-free approvals** (the gate's decision file), Queue add, Gate and Policy still work, and
+kitty sessions are unaffected. A queued task simply waits. `keystrokes.refuseSharedWindow:
+false` in `~/.claude/cc-config.json` turns the guard off.
+
 **Right-click** a tile for a context menu:
 
 - **Jump to window** — focus that session's editor window (the same as a double-click,

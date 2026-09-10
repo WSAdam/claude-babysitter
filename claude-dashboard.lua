@@ -332,6 +332,41 @@ end
 local FX = {}
 function FX.now() return os.time() end
 function FX.log(m) print(m) end
+
+-- The one window-effect target builder (2026-09-10): every keystroke path takes its target
+-- from a status item through here -- same shape as core.handleAction's -- so each carries
+-- the folder the session started in (the window it lives in) and its shared-window count,
+-- which the effect chokepoints below refuse.
+function FX.targetFor(it)
+  it = it or {}
+  return { key = it.key, name = it.name, cwd = it.cwd, editor = it.editor, origin = it.originDir,
+           kittyWindowId = it.kitty_window_id, kittyListenOn = it.kitty_listen_on,
+           shared = it.sharedWindow }
+end
+
+-- Shared windows (2026-09-10): a keystroke meant for one of several Claude sessions in one
+-- VS Code window lands in whichever tab is in front, so the effects refuse it. Takes an
+-- effect target (`shared`) or a status item (`sharedWindow`; core.handleAction passes
+-- the item). One log line per refusal; an alert at most once a minute per session.
+-- Returns true when it refused.
+function FX.refuseShared(target, what)
+  if type(target) ~= "table" or target.editor == "kitty" or target.remote then return false end
+  local n = tonumber(target.shared or target.sharedWindow) or 0
+  if n <= 1 then return false end
+  local name = tostring(target.label or target.name or "?")
+  print("[cc-dashboard] ⚠️ " .. tostring(what or "keys") .. " NOT sent to '" .. name
+    .. "': its window hosts " .. n .. " Claude sessions (can't pick the tab)")
+  FX._refusedAt = FX._refusedAt or {}
+  local k, now = tostring(target.key or name), FX.now()
+  if not FX._refusedAt[k] or now - FX._refusedAt[k] >= 60 then
+    FX._refusedAt[k] = now
+    pcall(function()
+      hs.alert.show("Shepherd won't type into " .. name .. ": its window has " .. n
+        .. " Claude tabs and it can't pick one. Jump there and act in the tab.")
+    end)
+  end
+  return true
+end
 -- Stale-"done" self-heal latch: tile key -> the file's frozen `updated` at the tick
 -- the heal fired (see the heal block in refresh). On FX (an existing module table),
 -- NOT a new top-level local -- this file is at Lua's 200-local ceiling.
@@ -2418,10 +2453,9 @@ function FX.runImprove(item)
         hs.alert.show("No improvements found for " .. repo)
         return
       end
-      -- inline target (winTarget is a local defined later in the file, so not in
-      -- scope here; this mirrors its shape for the kitty/VS Code injection routing).
-      local target = { name = item.name, cwd = item.cwd, editor = item.editor,
-                       kittyWindowId = item.kitty_window_id, kittyListenOn = item.kitty_listen_on }
+      -- FX.targetFor (winTarget is a local defined later in the file, so not in scope
+      -- here): the origin folder finds the window, the shared count gates the paste.
+      local target = FX.targetFor(item)
       -- pasteIntoWindow reports delivery (false = no positive window match); the
       -- cards are already claimed server-side, so a skipped paste must not be
       -- announced as "sent" -- surface it so the user can re-run from the window.
@@ -2606,11 +2640,8 @@ local function kittyItem(target)
            kitty_listen_on = target.kittyListenOn, cwd = target.cwd }
 end
 -- Build a window-effect target from a status item (for the direct, non-handleAction
--- call sites: feedTask / clear / compact / image-paste).
-local function winTarget(it)
-  return { name = it.name, cwd = it.cwd, editor = it.editor, origin = it.originDir,
-           kittyWindowId = it.kitty_window_id, kittyListenOn = it.kitty_listen_on }
-end
+-- call sites: feedTask / clear / compact / image-paste). See FX.targetFor.
+local function winTarget(it) return FX.targetFor(it) end
 
 function FX.focusWindow(target)
   if isKitty(target) then return runKitty(core.kittyCmd("focus", kittyItem(target))) end
@@ -2729,6 +2760,7 @@ end
 -- identified, the keys are SKIPPED: typing into whatever happens to be
 -- frontmost answers/closes a different session.
 local function sendToWindow(target, sendFn)
+  if FX.refuseShared(target, "keys") then return false end   -- a shared window: no focus, no keys
   local prev = RESTORE_FOCUS and hs.window.focusedWindow() or nil
   if not focusProject(target.name, target.cwd, target.editor, nil, { origin = target.origin }) then
     print("[cc-dashboard] no window match for '" .. tostring(target.name) .. "' -- keys NOT sent")
@@ -2793,6 +2825,9 @@ function FX.pasteIntoWindow(target, payload)
     -- R1-15: liveness-probe so a paste into a dead window reports false (task stays queued).
     return FX.runKittyChecked(kittyItem(target), core.kittyCmd("text", kittyItem(target), { text = txt }))
   end
+  -- a shared window: refuse before any focus or clipboard change; false = not delivered,
+  -- so a queued task stays queued (FX.refuseShared)
+  if FX.refuseShared(target, "paste") then return false end
   local name = target.name
   print("[cc-dashboard] paste -> " .. tostring(name)
     .. (payload.imagePath and " [image]" or "")
@@ -2904,6 +2939,7 @@ function FX.sendKeys(target, keys)
     -- base. Probe window liveness first, exactly like send-text.
     return FX.runKittyChecked(kittyItem(target), core.kittyCmd("key", kittyItem(target), { tokens = tokens }))
   end
+  if FX.refuseShared(target, "keys") then return false end   -- a shared window: no focus, no keys
   local name = target.name
   print("[cc-dashboard] send keys -> " .. tostring(name) .. " (" .. #keys .. " keys)")
   local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
@@ -3805,8 +3841,7 @@ function FX.abKeep(cohort, winnerLabel)
         -- back-to-back into whichever window was frontmost: the second chord could
         -- close the WINNER's window (or an unrelated VS Code project). Each slot
         -- re-focuses its own loser right before its chord.
-        local target = { name = tile.name, cwd = tile.cwd, editor = tile.editor,
-          kittyWindowId = tile.kitty_window_id, kittyListenOn = tile.kitty_listen_on }
+        local target = FX.targetFor(tile)
         dispatchSerialized(tile, "close", function() FX.closeWindow(target) end)
         FX.removeStatus(tile.key)
       end
@@ -7248,6 +7283,7 @@ local HTML = [[
   #d-dot  { width:10px; height:10px; border-radius:50%; background:var(--dc,var(--dim)); flex:0 0 auto; }
   #d-name { font-size:14px; font-weight:700; color:var(--text-strong); }
   #d-status { font-size:11px; color:var(--muted); margin-left:auto; }
+  #d-shared { display:none; font-size:11px; color:var(--warn); margin:6px 0 0; line-height:1.35; }
   #d-prompt { font-size:12px; color:var(--text-3); margin:8px 0 0; max-height:48px; overflow:hidden; }
   #d-ask { display:none; margin:8px 0 0; }
   #d-ask .ask-q { font-size:12px; color:var(--text-2); margin-top:6px; }
@@ -7947,6 +7983,7 @@ local HTML = [[
       <span id="d-wt"></span>
       <span id="d-status"></span>
     </div>
+    <div id="d-shared"></div>
     <!-- L5 tab strip: groups the views Shepherd already renders. The bar is
          built in JS from __DETAIL_TABS__ (single source w/ core.DETAIL_TABS);
          only the active panel shows. Renderers keep writing into the same div
@@ -11700,15 +11737,41 @@ local HTML = [[
       // would use them) -- but Feed next is blocked (no local window).
       var remote = !!it.remote;
       var remoteWait = remote && it.gate === "waiting";
-      ["b-jump","b-stop","b-auto","b-clear","b-compact","b-improve","b-nudge","b-feed",
+      // Shared window (2026-09-10): this session's VS Code window hosts other Claude
+      // sessions, and Shepherd types into the window, not a tab -- so every keystroke
+      // control greys out (Lua refuses them anyway). Jump, Queue, Gate and Policy stay live.
+      var sharedN = (!remote && it.editor !== "kitty") ? (it.sharedWindow|0) : 0;
+      var shared = sharedN > 1;
+      var gateWait = it.gate === "waiting";
+      var REMOTE_T = "Remote session — headless approve/deny only";
+      var SHARED_T = "Its VS Code window hosts " + sharedN + " Claude sessions — Shepherd can't pick the tab, so it won't type here. Jump there and act in the tab.";
+      var SHARED_IDS = ["b-stop","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind","effort","mode","d-model"];
+      // Lock with a reason as the tooltip; unlocking restores the tooltip it had (controls
+      // never locked keep whatever title other code gives them, e.g. syncGateSelect).
+      function lockCtl(el, why){
+        if(why){
+          if(!el.hasAttribute("data-t0")) el.setAttribute("data-t0", el.title || "");
+          el.disabled = true; el.title = why;
+        } else {
+          el.disabled = false;
+          if(el.hasAttribute("data-t0")){ el.title = el.getAttribute("data-t0"); el.removeAttribute("data-t0"); }
+        }
+      }
+      ["b-jump","b-stop","b-auto","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind",
        "effort","mode","d-model","d-gate","d-policy","nudge"].forEach(function(id){
         var el = document.getElementById(id); if(!el) return;
-        el.disabled = remote;
-        if(remote){ el.title = "Remote session — headless approve/deny only"; }
-        else if(el.title === "Remote session — headless approve/deny only"){ el.title = ""; }
+        var why = (remote && id !== "b-rewind") ? REMOTE_T : ((shared && SHARED_IDS.indexOf(id) >= 0) ? SHARED_T : "");
+        lockCtl(el, why);
       });
+      var dsh = document.getElementById("d-shared");
+      if(dsh){
+        var others = sharedN - 1;
+        dsh.textContent = shared ? "⧉ Shares its VS Code window with " + others + " other Claude session"
+          + (others === 1 ? "" : "s") + " — Shepherd won't type into it. Jump there and act in the tab." : "";
+        dsh.style.display = shared ? "block" : "none";
+      }
       var bdeny = document.getElementById("b-deny");
-      bdeny.disabled = remote && !remoteWait;
+      lockCtl(bdeny, (remote && !remoteWait) ? REMOTE_T : ((shared && !gateWait) ? SHARED_T : ""));
       // Errored session: the Approve button becomes Continue (types "continue" + Enter to
       // resume the aborted turn). Restored to Approve for every other status.
       var bap = document.getElementById("b-approve");
@@ -11722,8 +11785,9 @@ local HTML = [[
         bap.style.borderColor = ""; bap.style.color = "";
       }
       // Remote: Approve works only as a headless gate decision (waiting), and
-      // Continue (keystrokes) never does.
-      bap.disabled = remote && (!remoteWait || st === "error");
+      // Continue (keystrokes) never does. A shared window: the same rule.
+      lockCtl(bap, (remote && (!remoteWait || st === "error")) ? REMOTE_T
+        : ((shared && (!gateWait || st === "error")) ? SHARED_T : ""));
       applyExpand();
       // NB: the tab bar + inline timeline are (re)built on selection / tab-click /
       // pin-toggle -- NOT here. renderDetail runs every 1s tick for the selected
@@ -14387,6 +14451,28 @@ function refreshList()
       list[#list + 1] = it
     end
   end
+  -- Shared windows (2026-09-10): how many sessions share each session's VS Code window --
+  -- from the whole local list, hidden sessions included (a hidden tab is still a tab
+  -- there). Stamped on the items so the effects, core and the panel read one truth;
+  -- keystrokes.refuseSharedWindow = false leaves it unset (guard off). One log line
+  -- whenever a session starts or stops sharing.
+  do
+    local sw = (core.config(cfg, "keystrokes.refuseSharedWindow", true) ~= false)
+      and core.sharedWindowCounts(list) or {}
+    FX._sharedWas = FX._sharedWas or {}
+    local seen = {}
+    for _, it in ipairs(list) do
+      it.sharedWindow = sw[it.key]
+      seen[it.key] = true
+      if (sw[it.key] ~= nil) ~= (FX._sharedWas[it.key] ~= nil) then
+        print("[cc-dashboard] " .. (sw[it.key] and ("⧉ '" .. tostring(it.name) .. "' shares its window with "
+          .. (sw[it.key] - 1) .. " other session(s) -- keystroke actions refused")
+          or ("'" .. tostring(it.name) .. "' has its window to itself again -- keystroke actions back")))
+      end
+      FX._sharedWas[it.key] = sw[it.key]
+    end
+    for k in pairs(FX._sharedWas) do if not seen[k] then FX._sharedWas[k] = nil end end
+  end
   -- SSH status bridge (roadmap #7): merge each live host's mirror dir as
   -- host-namespaced tiles. NEVER pruned locally (rsync --delete is truth: a
   -- remote SessionEnd removes the mirror file; FX.removeStatus on a namespaced
@@ -14988,7 +15074,10 @@ function FX._refreshBody()
       routeGroups[qk] = routeGroups[qk] or {}
       table.insert(routeGroups[qk], it)
     end
+    -- (a session in a shared window is never auto-fed: the task would be pasted into
+    -- whichever tab is in front -- it stays queued; core.keystrokeBlocked)
     if not drained and not it.stale and not it.remote and not routedHere
+       and not core.keystrokeBlocked(it)
        and core.shouldFeed(pv and pv.status, it.status, q, autofeed) then
       if queueDry then
         local task = core.queuePop(q)
@@ -15146,8 +15235,9 @@ function FX._refreshBody()
     -- R3-23: pass statusKnown so a FAILED transcript-tail read (wantTail but tail==nil)
     -- doesn't masquerade as "left the error state" and wipe the accumulated grace clock.
     -- When no tail was wanted, status is authoritative -> known.
+    -- A session in a shared window (core.keystrokeBlocked) never fires: "continue" is typed.
     local cstep = core.stepAutoContinue(autoContinueState, it,
-      { enabled = autoContinueOn and not it.remote, now = now,
+      { enabled = autoContinueOn and not it.remote and not core.keystrokeBlocked(it), now = now,
         minSeconds = autoContinueDelay, maxAttempts = autoContinueMax,
         statusKnown = (not wantTail) or (tail ~= nil) })
     if cstep.fire then
@@ -15174,8 +15264,8 @@ function FX._refreshBody()
     -- done is skipped). Local sessions only (shouldSummarize excludes remote/stale);
     -- delivery-gated -- ledger only when the paste actually lands.
     if summaryOn then
-      local sstep = core.stepSelfSummary(summaryState, it,
-        { enabled = true, prevStatus = pv and pv.status or nil })
+      local sstep = core.stepSelfSummary(summaryState, it,   -- a shared window: the prompt is typed, so never
+        { enabled = not core.keystrokeBlocked(it), prevStatus = pv and pv.status or nil })
       if sstep.fire then
         local su = it
         dispatchSerialized(su, "summary", function()
