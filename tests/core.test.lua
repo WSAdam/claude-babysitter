@@ -8657,5 +8657,23 @@ do
   eq("payload: says when the card can open a new worktree tab", pay.canNewTab, true)
 end
 
+-- ---- A spawn into a window that already has a Claude tab (2026-09-10) ----------
+do
+  -- 2026-09-10: the warm spawn ladder's ⌘Esc focused the Claude tab already in the window,
+  -- so the new session's task was pasted and sent into that existing session.
+  local list = {
+    { key = "a", editor = "vscode", cwd = "/r/main/.claude/worktrees/x", originDir = "/r/main" },   -- a tab that moved into a worktree
+    { key = "b", editor = "cursor", cwd = "/r/main/" },                                               -- no transcript yet: its cwd
+    { key = "c", editor = "vscode", cwd = "/r/other" },
+    { key = "k", editor = "kitty", cwd = "/r/main" },                                                 -- kitty has its own windows
+    { key = "r", editor = "vscode", cwd = "/r/main", remote = { host = "box" } },
+  }
+  local got = {}
+  for _, it in ipairs(core.windowSessionsFor(list, "/r/main")) do got[#got + 1] = it.key end
+  eq("window sessions: the tabs that started in the folder, by origin, else cwd", table.concat(got, ","), "a,b")
+  eq("window sessions: none for a folder nobody started in", #core.windowSessionsFor(list, "/r/none"), 0)
+  eq("window sessions: no folder, none", #core.windowSessionsFor(list, nil), 0)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

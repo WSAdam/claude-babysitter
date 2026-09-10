@@ -1115,6 +1115,23 @@ function M.enterWorktreePrompt(path, branch)
     .. ": call EnterWorktree with path \"" .. tostring(path) .. "\", then wait for my instructions."
 end
 
+-- The sessions living in the editor window a spawn for `project` would reuse: local VS
+-- Code/Cursor tiles whose window is that folder's -- the folder they started in (originDir),
+-- else, before their first transcript line, their cwd. A spawn that finds one must not
+-- ⌘Esc: that focuses the Claude tab the extension last used, not a new one. Pure.
+function M.windowSessionsFor(list, project)
+  local out = {}
+  if type(project) ~= "string" or project == "" then return out end
+  local p = M.normDir(project)
+  for _, it in ipairs(list or {}) do
+    if type(it) == "table" and not it.remote and (it.editor == "vscode" or it.editor == "cursor") then
+      local home = it.originDir or it.cwd
+      if type(home) == "string" and M.normDir(home) == p then out[#out + 1] = it end
+    end
+  end
+  return out
+end
+
 -- Is `path` a worktree Claude made under the main checkout's .claude/worktrees/?
 function M.isClaudeWorktree(mainRoot, path)
   if type(mainRoot) ~= "string" or type(path) ~= "string" then return false end

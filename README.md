@@ -475,7 +475,9 @@ Click **New** (or **⌘⌥S**) to open the **New session** modal:
   optional initial task into the Claude input; set `spawn.vscodeFlavor` to `terminal` (⚙ Settings →
   Spawn) for the old behavior of typing a `claude` CLI line into a fresh integrated terminal. ssh
   spawns and gateway providers always use the terminal flavor (the extension can't run a remote
-  claude or carry `ANTHROPIC_*` env).
+  claude or carry `ANTHROPIC_*` env). If the project's window **already has a live Claude tab**,
+  ⌘Esc would focus *that* tab, so the spawn opens a **new Claude tab** through the extension's URI
+  instead, with the task typed in — press Return to send it (see "New worktree tab").
 - **Permission mode** — Default / Plan / Accept edits / Automate (`claude --permission-mode <m>`).
 - **Provider** — which model/backend to launch this session against (see "Providers & models" below).
 - **Initial task** (optional).

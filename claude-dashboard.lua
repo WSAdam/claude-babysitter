@@ -3060,6 +3060,23 @@ function FX.applySpawnFrame(frame, why)
   end)
 end
 
+-- Does the editor window a spawn for `project` would reuse already hold a LIVE Claude
+-- session (core.windowSessionsFor)? Liveness comes from the sessions' own pids (one `ps`),
+-- so a crashed session's lingering tile doesn't count; a tile with no pid counts (the safe
+-- side: a new tab never types into anyone).
+function FX.windowHasLiveSession(project)
+  local pids = {}
+  for _, it in ipairs(core.windowSessionsFor(lastRenderList or {}, project)) do
+    local sp = tostring(it.session_pid or "")
+    if not sp:match("^%d+$") then return true end
+    pids[#pids + 1] = sp
+  end
+  if #pids == 0 then return false end
+  local out = ""
+  pcall(function() out = hs.execute("ps -o pid= -p " .. table.concat(pids, ",") .. " 2>/dev/null") or "" end)
+  return tostring(out):match("%d") ~= nil
+end
+
 local function spawnEditorWindow(spec)
   print("[cc-orch] " .. spec.editor .. " spawn: open " .. spec.app .. " at " .. tostring(spec.project))
   local ladderKey = core.spawnLadderKey(spec)
@@ -3186,6 +3203,14 @@ local function spawnEditorWindow(spec)
         end
       end
       sched(2.0 + spawnDelay, poll)  -- a head start for `open` to launch the window (R3-07: + shared-tail slot)
+      return
+    end
+    -- 2026-09-10: the window already holds a live Claude session. ⌘Esc (claude-vscode.focus)
+    -- would focus THAT session's tab and the task would be pasted and sent into it -- so
+    -- open a new tab through the extension's URI instead, task typed in, never sent.
+    if FX.windowHasLiveSession(proj) then
+      print("[cc-orch] vscode: " .. tostring(name) .. "'s window already has a Claude session -- a new tab, not ⌘Esc")
+      FX.openClaudeTab({ root = proj, editor = spec.editor, prompt = spec.task or "" })
       return
     end
     -- WARM extension (existing window, already activated): one ⌘Esc, then the task.

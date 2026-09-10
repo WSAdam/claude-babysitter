@@ -89,6 +89,9 @@ echo ""
 echo "== lua: New worktree tab opens a prefilled Claude tab, never a keystroke (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/new-worktree-tab.test.lua" || fail=1
 echo ""
+echo "== lua: a new session in a window that already has a Claude tab gets its own tab (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/spawn-open-window.test.lua" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

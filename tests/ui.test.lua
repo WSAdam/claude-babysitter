@@ -3135,6 +3135,12 @@ do
         and src:find('send("new-worktree-tab", INST.stackKey, m.text);', 1, true) ~= nil)
   check("newtab-pin: the card menu opens Instances with the form open",
         src:find('wv:evaluateJavaScript("openInstancesFor(" .. jsString(item.stackKey) .. ", true)")', 1, true) ~= nil)
+  -- 2026-09-10: a warm spawn's ⌘Esc focused the Claude tab already in the window
+  local iCheck = src:find("if FX.windowHasLiveSession(proj) then", 1, true)
+  local iWarm = src:find("-- WARM extension (existing window, already activated): one ⌘Esc, then the task.", 1, true)
+  check("newtab-pin: a warm spawn into a window with a live Claude session opens a new tab before any ⌘Esc",
+        iCheck and iWarm and iCheck < iWarm
+        and src:find('FX.openClaudeTab({ root = proj, editor = spec.editor, prompt = spec.task or "" })', 1, true) ~= nil or false)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

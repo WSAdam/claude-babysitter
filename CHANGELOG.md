@@ -4,6 +4,21 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — A new session in an open project gets its own tab
+
+### Fixed — spawning into a window that already had a Claude tab typed into that tab
+
+When a project's VS Code window was already open, the spawn ladder pressed ⌘Esc to open the
+Claude panel, then pasted the task and pressed Return. But ⌘Esc is `claude-vscode.focus`: with a
+Claude tab already in the window it focuses *that* tab — so "start a new session here" pasted the
+task into the session already running there and sent it. Now, when the window already holds a live
+Claude session (a tile that started in that folder whose process is still alive — one `ps` over
+their pids, so a crashed session's leftover tile doesn't count), the spawn opens a new Claude tab
+through the extension's URI instead, with the task typed in and waiting for Return, like New
+worktree tab. A window with no live session, and a cold start, take the usual ladder. Fixtures:
+`tests/core.test.lua` and the behavioral `tests/spawn-open-window.test.lua` (red before the fix:
+the keys went `escape, v, return`).
+
 ## 2026-09-10 — New worktree tab
 
 ### Added — start a unit as a new Claude tab in its own worktree
