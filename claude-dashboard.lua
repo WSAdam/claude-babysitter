@@ -312,7 +312,7 @@ local function focusProject(name, cwd, editor, activateOnMiss, opts)
   local titles = {}
   for i, w in ipairs(windows) do titles[i] = w:title() or "" end
   local idx, how, needle = core.pickWindow(titles, name, cwd, os.getenv("USER"),
-    { editor = editor, ancestors = not (opts and opts.ancestors == false) })
+    { editor = editor, ancestors = not (opts and opts.ancestors == false), origin = opts and opts.origin })
   if idx then
     windows[idx]:focus()
     print("[cc-dashboard] focused (" .. tostring(how) .. ": " .. tostring(needle) .. "): "
@@ -2236,7 +2236,7 @@ function FX.notify(title, text, opts)
             pcall(function() FX.focusWindow({ name = it.name, cwd = it.cwd, editor = it.editor,
               kittyWindowId = it.kitty_window_id, kittyListenOn = it.kitty_listen_on }) end)
           else
-            pcall(function() focusProject(it.name, it.cwd, it.editor, true) end)
+            pcall(function() focusProject(it.name, it.cwd, it.editor, true, { origin = it.originDir }) end)
           end
         end)
       end
@@ -2496,7 +2496,7 @@ end
 -- Build a window-effect target from a status item (for the direct, non-handleAction
 -- call sites: feedTask / clear / compact / image-paste).
 local function winTarget(it)
-  return { name = it.name, cwd = it.cwd, editor = it.editor,
+  return { name = it.name, cwd = it.cwd, editor = it.editor, origin = it.originDir,
            kittyWindowId = it.kitty_window_id, kittyListenOn = it.kitty_listen_on }
 end
 
@@ -2504,7 +2504,7 @@ function FX.focusWindow(target)
   if isKitty(target) then return runKitty(core.kittyCmd("focus", kittyItem(target))) end
   -- Jump is an explicit "take me there": raising the app on a title miss is
   -- still useful. The keystroke paths pass false (a miss must disturb nothing).
-  return focusProject(target.name, target.cwd, target.editor, true)
+  return focusProject(target.name, target.cwd, target.editor, true, { origin = target.origin })
 end
 
 -- hs.timer.doAfter returns a timer that, if nothing references it, can be GC'd
@@ -2618,7 +2618,7 @@ end
 -- frontmost answers/closes a different session.
 local function sendToWindow(target, sendFn)
   local prev = RESTORE_FOCUS and hs.window.focusedWindow() or nil
-  if not focusProject(target.name, target.cwd, target.editor) then
+  if not focusProject(target.name, target.cwd, target.editor, nil, { origin = target.origin }) then
     print("[cc-dashboard] no window match for '" .. tostring(target.name) .. "' -- keys NOT sent")
     return
   end
@@ -2690,7 +2690,7 @@ function FX.pasteIntoWindow(target, payload)
   local isSlash = payload.text ~= nil and payload.text:match("^/") ~= nil
   local prevClip = hs.pasteboard.readString()  -- best-effort restore (text only)
   local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
-  if not focusProject(name, target.cwd, target.editor) then
+  if not focusProject(name, target.cwd, target.editor, nil, { origin = target.origin }) then
     print("[cc-dashboard] no window match for '" .. tostring(name) .. "' -- paste NOT sent")
     return false  -- callers must be able to tell a skip from a delivery (queue pop gates on it)
   end
@@ -2795,7 +2795,7 @@ function FX.sendKeys(target, keys)
   local name = target.name
   print("[cc-dashboard] send keys -> " .. tostring(name) .. " (" .. #keys .. " keys)")
   local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
-  if not focusProject(name, target.cwd, target.editor) then
+  if not focusProject(name, target.cwd, target.editor, nil, { origin = target.origin }) then
     print("[cc-dashboard] no window match for '" .. tostring(name) .. "' -- keys NOT sent")
     return false
   end
@@ -3370,6 +3370,32 @@ end
 -- Stamp every session in the tick's list (hidden ones included) with its stack identity.
 -- Runs after relabels, so a repo card takes its main checkout's relabel. stacks.enabled
 -- = false strips the stack fields: the panel falls back to one card per session.
+-- The folder each session STARTED in (core.transcriptOriginCwd on its transcript head),
+-- stamped as it.originDir: every window lookup tries it first, because a VS Code session
+-- lives in the window it started in even after EnterWorktree moves its cwd. One 16KB read
+-- per session, cached; a transcript with no message yet is retried after 30s.
+function FX.annotateOrigins(list)
+  FX._originDir = FX._originDir or {}
+  local now, live = FX.now(), {}
+  for _, it in ipairs(list or {}) do
+    if it.key and not it.remote and type(it.transcript_path) == "string" then
+      live[it.key] = true
+      local c = FX._originDir[it.key]
+      if not c or (c.dir == nil and now - c.at >= 30) then
+        local head
+        pcall(function()
+          local f = io.open(it.transcript_path, "rb")
+          if f then head = f:read(16384); f:close() end
+        end)
+        c = { dir = core.transcriptOriginCwd(head), at = now }
+        FX._originDir[it.key] = c
+      end
+      it.originDir = c.dir
+    end
+  end
+  for k in pairs(FX._originDir) do if not live[k] then FX._originDir[k] = nil end end
+end
+
 function FX.annotateStacks(list, labels, cfg)
   if core.config(cfg, "stacks.enabled", true) == false then
     for _, it in ipairs(list or {}) do it.stackKey = nil; it.stackName = nil end
@@ -15267,6 +15293,7 @@ function FX._refreshBody()
   -- repo's main checkout and its worktrees share one card. After the relabels (a repo
   -- card takes its main checkout's relabel); hidden sessions included.
   FX.annotateStacks(list, labels, cfg)
+  FX.annotateOrigins(list)   -- the window each session lives in (see FX.annotateOrigins)
   -- Two sessions in ONE project used to render as IDENTICAL cards: the name (and
   -- any relabel) is per-projectKey, so nothing on either tile said which chat it
   -- was. Give each of those tiles its own chat title -- and only those, so a

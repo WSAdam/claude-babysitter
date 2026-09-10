@@ -231,6 +231,7 @@ function M.handleAction(fx, item, action, text)
   local tgt = {
     name = item.name, cwd = item.cwd, editor = item.editor,
     kittyWindowId = item.kitty_window_id, kittyListenOn = item.kitty_listen_on,
+    origin = item.originDir,   -- the folder it started in: the window it lives in (pickWindow)
   }
   if action == "focus" then
     -- A jump that landed marks the instance seen: a finished one stops leading its
@@ -5896,7 +5897,21 @@ function M.pickWindow(titles, name, cwd, user, opts)
   opts = opts or {}
   titles = titles or {}
   local anc = (opts.ancestors ~= false) and cwd or nil
-  for _, needle in ipairs(M.focusCandidates(name, anc, user)) do
+  local cands = M.focusCandidates(name, anc, user)
+  -- opts.origin: the folder the session STARTED in (its transcript's first cwd). A VS
+  -- Code session never changes windows, so after EnterWorktree -- when its cwd/name are
+  -- the worktree's -- it still lives in the window opened on its origin folder: that
+  -- folder is tried FIRST. For a session still in its own folder it's the same name.
+  local origin = type(opts.origin) == "string" and opts.origin:match("([^/]+)/?$") or nil
+  if origin then
+    local o = string.lower(origin)
+    if o ~= "" and not M.FOCUS_SKIP[o] and o ~= string.lower(user or "") then
+      local front = { o }
+      for _, c in ipairs(cands) do if c ~= o then front[#front + 1] = c end end
+      cands = front
+    end
+  end
+  for _, needle in ipairs(cands) do
     local idx, rank = M.bestWindowFor(titles, needle)
     if idx then return idx, (rank == 2) and "exact" or "folder", needle end
   end
@@ -5915,6 +5930,19 @@ function M.pickWindow(titles, name, cwd, user, opts)
   local idx = M.bestWindowFor(titles, raw)
   if idx then return idx, "loose", raw end
   return nil
+end
+
+-- The folder a session STARTED in: the first "cwd" in its transcript's head (JSONL; the
+-- first message records the launch directory). The window a VS Code session lives in is
+-- the one opened on that folder, even after EnterWorktree moves its cwd. nil when the
+-- head has no cwd yet (a transcript too new to have a message).
+function M.transcriptOriginCwd(head)
+  if type(head) ~= "string" then return nil end
+  local raw = head:match('"cwd"%s*:%s*"(.-[^\\])"')   -- up to the first unescaped quote
+  if not raw or raw == "" then return nil end
+  raw = raw:gsub("\\/", "/")
+  if raw:sub(1, 1) ~= "/" or raw:find('\\', 1, true) then return nil end   -- other escapes: don't guess
+  return M.normDir(raw)
 end
 
 -- Reverse window match: which session owns the window titled `title`? Used by the deck's

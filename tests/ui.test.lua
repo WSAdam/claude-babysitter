@@ -1112,7 +1112,16 @@ do
   -- L5 Inc 5: OS-native banners (off by default) via core.notifyDecision + FX.notify (hs.notify)
   check("l5-pin: FX.notify wraps hs.notify", src:find("function FX.notify(title, text, opts)", 1, true) ~= nil
         and src:find("hs.notify.new(function()", 1, true) ~= nil)
-  check("l5-pin: notify click jumps to session", src:find("focusProject(it.name, it.cwd, it.editor, true)", 1, true) ~= nil)
+  -- REQUIREMENT CHANGE 2026-09-10: + the session's origin folder (see #28-pin below).
+  check("l5-pin: notify click jumps to session", src:find("focusProject(it.name, it.cwd, it.editor, true, { origin = it.originDir })", 1, true) ~= nil)
+  -- 2026-09-10: every window lookup tries the folder the session STARTED in first --
+  -- after EnterWorktree a session's name is the worktree's, but it lives in its origin
+  -- window (behaviour: core.test.lua "A session that entered a worktree ...").
+  check("origin-pin: the tick stamps each session's origin folder", src:find("  FX.annotateOrigins(list)", 1, true) ~= nil)
+  check("origin-pin: jump and every keystroke path pass the origin to focusProject",
+        src:find("return focusProject(target.name, target.cwd, target.editor, true, { origin = target.origin })", 1, true) ~= nil
+        and select(2, src:gsub("target.editor, nil, { origin = target.origin }", "")) == 3
+        and src:find("origin = opts and opts.origin })", 1, true) ~= nil)
   check("l5-pin: banner decision via cc-core", src:find("core.notifyDecision(pv.status, it, cfg)", 1, true) ~= nil)
   check("l5-pin: banner gated off by default", src:find('core.config(cfg, "notifications.banner.onApproval", false)', 1, true) ~= nil)
   -- L6: event-callback rule engine (cc-rules.json, off by default), safe processors
@@ -2617,8 +2626,10 @@ do
     local body = n and src:sub(n, n + 1400) or ""
     check("#28-pin: notify click reserves a serialized slot",
           body:find('dispatchSerialized(it, "focus", function()', 1, true) ~= nil)
+    -- REQUIREMENT CHANGE 2026-09-10: the call also carries the session's origin folder
+    -- (the window it lives in, even after EnterWorktree) -- still one focusProject jump.
     check("#28-pin: the focus itself still goes through focusProject",
-          body:find("focusProject(it.name, it.cwd, it.editor, true)", 1, true) ~= nil)
+          body:find("focusProject(it.name, it.cwd, it.editor, true, { origin = it.originDir })", 1, true) ~= nil)
   end
 
   -- #30: each voice recording gets a unique wav (no fixed cc-voice.wav that a

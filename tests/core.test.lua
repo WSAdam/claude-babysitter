@@ -2353,6 +2353,42 @@ do
      core.pickWindow({ "myapp-fix-y — zsh — 80×24" }, "myapp", "/p/myapp", U, TM), nil)
 end
 
+-- ---- A session that entered a worktree still lives in its window (2026-09-10) ----
+-- Cause (live, 11:40:33): double-clicking the Shepherd card picked the session that had
+-- EnterWorktree'd into ../claude-instance-manager-project-instances. Its status file then
+-- names the WORKTREE folder, but a VS Code session never changes windows -- it still lives
+-- in the window opened on the folder it started in ("… — claude-instance-manager"), so no
+-- title matched and the jump just activated the app. The transcript's first cwd is that
+-- origin folder.
+do
+  local head = '{"type":"summary","leafUuid":"x"}\n'
+            .. '{"parentUuid":null,"cwd":"\\/Users\\/adam\\/Programming\\/claude-instance-manager","sessionId":"s","type":"user"}\n'
+            .. '{"cwd":"/Users/adam/Programming/claude-instance-manager-project-instances","type":"user"}\n'
+  eq("origin: the transcript's FIRST cwd is where the session started",
+     core.transcriptOriginCwd and core.transcriptOriginCwd(head), "/Users/adam/Programming/claude-instance-manager")
+  eq("origin: no cwd yet (a brand-new transcript) -> nil",
+     core.transcriptOriginCwd and core.transcriptOriginCwd('{"type":"summary"}\n') or nil, nil)
+
+  local titles = { "Claude tabs workflow int… — claude-instance-manager", "x — ChargebackSentinel" }
+  eq("pickWindow: a session that entered a worktree jumps to the window it lives in",
+     core.pickWindow(titles, "claude-instance-manager-project-instances",
+       "/Users/adam/Programming/claude-instance-manager-project-instances", "adam",
+       { editor = "vscode", origin = "/Users/adam/Programming/claude-instance-manager" }), 1)
+  eq("pickWindow: ...even when a window named for the worktree is also open",
+     core.pickWindow({ "x — claude-instance-manager-project-instances", titles[1] },
+       "claude-instance-manager-project-instances",
+       "/Users/adam/Programming/claude-instance-manager-project-instances", "adam",
+       { editor = "vscode", origin = "/Users/adam/Programming/claude-instance-manager" }), 2)
+  eq("pickWindow: an origin equal to the session's own folder changes nothing",
+     core.pickWindow({ "x — myapp" }, "myapp", "/p/myapp", "adam", { origin = "/p/myapp" }), 1)
+  eq("pickWindow: a generic origin folder is never a candidate",
+     core.pickWindow({ "x — project" }, "wt", "/p/wt", "adam", { origin = "/Users/adam/project", ancestors = false }), nil)
+
+  local r = newRecorder()
+  core.handleAction(r.fx, { key = "k", name = "wt", cwd = "/p/wt", editor = "vscode", originDir = "/p/main" }, "focus")
+  eq("focus: the window target carries the session's origin folder", (r.last().tgt or {}).origin, "/p/main")
+end
+
 -- ---- Part C: modeCycleSteps ------------------------------------------------
 do
   eq("mode: default->plan = 2", core.modeCycleSteps("default", "plan", {}), 2)

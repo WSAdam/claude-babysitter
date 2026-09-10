@@ -4,6 +4,21 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — Jumping to a session that entered a worktree lands on its window
+
+### Fixed — a session moved by EnterWorktree could not be jumped to
+
+Found live, minutes after project cards shipped: double-clicking the Shepherd card picked the
+session that had `EnterWorktree`'d into `../claude-instance-manager-project-instances`, and the
+jump just activated VS Code. After `EnterWorktree` a session's status file names the *worktree*
+folder — but a VS Code session never changes windows; it still lives in the window opened on
+the folder it started in, so no window title matched.
+
+Every window lookup (Jump, the notification click, and the keystroke paths) now tries the
+session's **origin** folder first — the first `cwd` in its transcript, read once per session.
+For a session still in its own folder the origin is that folder, so nothing changes. Fixtures
+in `core.test.lua` (red before the fix); verified live on the session that hit it.
+
 ## 2026-09-10 — One card per project: worktrees fold together, double-click finds who needs you
 
 ### Added — project cards, the Instances view (`stacks.enabled`, on by default)
