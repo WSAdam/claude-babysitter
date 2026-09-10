@@ -4,6 +4,28 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — Double-click (and select) land even while the grid re-renders
+
+### Fixed — tile presses dropped by a grid rebuild mid-press
+
+The README admitted it: "double-click on a tile isn't always reliable". Reproduced in a real
+browser with the shipped panel: `renderGrid` rebuilds the grid whenever any tile's data
+changes — several times a second while a session works — and when that rebuild lands between
+a press's mousedown and mouseup, the pressed tile is detached, so neither `click` nor
+`dblclick` reaches it. The jump (second press) and the select (first press) were silently
+dropped. A rebuild *between* presses was always harmless.
+
+Presses are now decided at **mousedown**, which reaches the live node: one listener on the
+persistent `#grid` reads the tile's key there, selects on the first press, and jumps on the
+second (the OS click count decides — a triple-click jumps once; a press pair spanning two
+different tiles, or starting on the PR badge, never jumps). The native right-click "Jump to
+window" stays as a second path.
+
+*Tests:* `tests/tile-dblclick.test.js` runs the shipped press logic against fake presses;
+`tests/tile-press.browser.test.js` replays the captured panel in headless Chromium and presses
+tiles while the grid rebuilds (red on the old markup for both the jump and the select). It
+prints an explicit skip where Playwright isn't installed.
+
 ## 2026-09-10 — Windows, keystrokes and spawns never land in a sibling's window
 
 ### Fixed — prefix-named siblings (and worktrees) stealing a project's window

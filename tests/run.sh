@@ -42,6 +42,12 @@ echo ""
 echo "== node: Done-drawer ordering (behavioral, runs the shipped comparator) =="
 node "$DIR/done-order.test.js" || fail=1
 echo ""
+echo "== node: tile presses (behavioral, runs the shipped press logic) =="
+node "$DIR/tile-dblclick.test.js" || fail=1
+echo ""
+echo "== node: tile presses in a real browser (skips without Playwright) =="
+node "$DIR/tile-press.browser.test.js" || fail=1
+echo ""
 echo "== bash: CLI-tools viewer wiring tripwire =="
 bash "$DIR/mcpskills-tools.test.sh" || fail=1
 echo ""

@@ -149,10 +149,12 @@ keep-awake toggle** (see "Keep this Mac awake"), **📊 Fleet insights** and **�
 ledger** overlays (see "Audit log & insights"), the **⚙ Settings** panel, and a theme switcher.
 
 **Single-click** a tile to select it (opens the detail panel). **Double-click** a
-tile to **jump** straight to its window. **Right-click** a tile for a context menu:
+tile to **jump** straight to its window. Both are decided the moment the button goes
+down, so they land even while a busy fleet is re-rendering the grid under the pointer.
+**Right-click** a tile for a context menu:
 
-- **Jump to window** — focus that session's editor window (double-click does the
-  same, but isn't always reliable, so it's offered here too).
+- **Jump to window** — focus that session's editor window (the same as a double-click,
+  offered here too).
 - **Relabel…** — give the tile a custom display name (e.g. "auth refactor" instead
   of the folder name). Display-only — jumps still target the real window — and
   **persistent**: keyed by the session's **stable project identity** (its launch

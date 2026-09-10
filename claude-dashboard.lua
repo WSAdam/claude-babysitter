@@ -5687,8 +5687,9 @@ local function handleBridgeMsg(msg)
         return
       end
       local menu = {
-        -- Jump focuses the editor window (double-click on a tile isn't always
-        -- reliable, so offer it here too). Same effect as the detail-panel Jump.
+        -- Jump focuses the editor window -- the same jump as a tile double-click
+        -- (decided at mousedown, so a grid re-render mid-press can't drop it), offered
+        -- here as a native-menu path too. Same effect as the detail-panel Jump.
         -- Serialized (R3 #2/#5) like every sibling jump path (hotkeys, Stream
         -- Deck, tile double-click): a direct focus here would raise this window
         -- while an earlier chain's ⌘V/Return beats are still pending on after()
@@ -13168,7 +13169,9 @@ local HTML = [[
       if(it.looping){ meta = (meta ? meta + " · " : "") + "⟳ looping"; }   // L5 loop watchdog
       if(it.churn){ meta = (meta ? meta + " · " : "") + "♻️" + it.churn; }   // respawn/clear churn today
       var cls = "tile s-" + stCls + (it.stale && !bgRunning(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
-      return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
+      // select + double-click jump are decided at mousedown by onGridMouseDown (below):
+      // a grid rebuild mid-press detaches the tile, so inline click handlers were lost
+      return '<div class="'+cls+'" data-key="'+esc(it.key)+'" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
            + '<span class="dot"></span>'
            + '<span class="name">'+esc(it.label || it.autoTitle || it.name)+(it.group ? ' <span class="gtag">🏷 '+esc(it.group)+'</span>' : '')+'</span>'
            + '<span class="label">'+(age ? '<span class="age">'+esc(age)+'</span> ' : '')+label+'</span>'
@@ -13197,7 +13200,7 @@ local HTML = [[
       if(!it.pr || !it.pr.badge) return "";
       var s = (it.pr.state || "").toLowerCase();
       return '<span class="pr pr-'+esc(s)+'" title="'+esc(it.pr.title || "")+' — click to open"'
-           + ' onclick="openPr(event)">'+esc(it.pr.badge)+'</span>';
+           + ' data-nodbl onclick="openPr(event)">'+esc(it.pr.badge)+'</span>';
     }
     function openPr(ev){
       if(ev){ ev.stopPropagation(); }
@@ -13205,6 +13208,50 @@ local HTML = [[
       var key = tile && tile.getAttribute("data-key");
       if(key) send("open-url", key);
     }
+
+    // ---- Tile presses: select + double-click jump, decided at MOUSEDOWN -----------
+    // 2026-09-10: renderGrid rebuilds grid.innerHTML several times a second while a
+    // session works. A rebuild between a press's mousedown and mouseup detaches the
+    // pressed node, so the tile's inline click/dblclick never fired -- the jump (and
+    // the select) were silently dropped. Mousedown is dispatched to the LIVE node, so
+    // ONE listener on the persistent #grid reads the key there, and the OS click count
+    // (e.detail) says which press of a double-click this is. A control inside a tile
+    // (data-nodbl: the PR badge) owns its own press. tests/tile-dblclick.test.js runs
+    // this exact code; tests/tile-press.browser.test.js replays it in a real browser.
+    var tileDblState = null;
+    function tileDblStep(st, key, t, detail, nodbl){
+      var next = { key: key, t: t, nodbl: !!nodbl };
+      if(nodbl) return [false, next];
+      if(detail === 2){
+        // a recent press on ANOTHER tile, or on a control inside one, vetoes the pair
+        if(st && (t - st.t) < 1000 && (st.key !== key || st.nodbl)) return [false, next];
+        return [true, next];
+      }
+      if(detail === 0){
+        // presses with no click count (synthetic): the same tile within 400ms, once
+        if(st && st.key === key && !st.nodbl && !st.fired && (t - st.t) <= 400){
+          next.fired = true;
+          return [true, next];
+        }
+      }
+      return [false, next];   // a first press (1), or a triple-click's third (3+)
+    }
+    function onGridMouseDown(e){
+      if(!e || e.button !== 0) return;   // left button only -- right-click is the context menu
+      var el = e.target;
+      var tile = el && el.closest ? el.closest(".tile") : null;
+      if(!tile) return;
+      var key = tile.getAttribute("data-key");
+      if(!key) return;
+      var nodbl = !!(el.closest && el.closest("[data-nodbl]"));
+      var r = tileDblStep(tileDblState, key, Date.now(), e.detail, nodbl);
+      tileDblState = r[1];
+      if(nodbl) return;                   // the badge's own click handler owns this press
+      if(e.detail === 1 || e.detail === 0) selectTile(key);
+      if(r[0]) tileActivate(key);
+    }
+    function tileActivate(key){ send("focus", key); }
+    document.getElementById("grid").addEventListener("mousedown", onGridMouseDown);
 
     var EMPTY_WAITING = 'Waiting for Claude Code sessions...<br>Start a session in any project.';
 

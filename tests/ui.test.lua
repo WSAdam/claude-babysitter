@@ -1543,6 +1543,19 @@ do
   -- of silently breaking every badge click.
   check("l5pr-fix: tile render emits an esc'd data-key for badge clicks",
         src:find("data-key=\"'+esc(it.key)", 1, true) ~= nil)
+  -- 2026-09-10: a grid rebuild between a press's mousedown and mouseup detached the tile,
+  -- dropping its inline click/dblclick (the jump and the select). Presses are decided at
+  -- mousedown by one listener on the persistent #grid (behaviour: tests/tile-dblclick.test.js
+  -- + tests/tile-press.browser.test.js); these pin the wiring those tests can't see.
+  check("tile-press-pin: a tile carries no inline click or dblclick handler",
+        src:find("ondblclick=\"send(\\'focus\\'", 1, true) == nil
+        and src:find("onclick=\"selectTile(\\'", 1, true) == nil)
+  check("tile-press-pin: one mousedown listener on the persistent #grid decides presses",
+        src:find('document.getElementById("grid").addEventListener("mousedown", onGridMouseDown);', 1, true) ~= nil)
+  check("tile-press-pin: the key is read from the live node's data-key at press time",
+        src:find('var key = tile.getAttribute("data-key");\n      if(!key) return;', 1, true) ~= nil)
+  check("tile-press-pin: the PR badge owns its own press (data-nodbl)",
+        src:find('data-nodbl onclick="openPr(event)"', 1, true) ~= nil)
   check("l5pr-pin: open-url validates scheme via pure core.isOpenableUrl",
         src:find("core.isOpenableUrl(url)", 1, true) ~= nil
         and src:find("hs.urlevent.openURL(url)", 1, true) ~= nil)
