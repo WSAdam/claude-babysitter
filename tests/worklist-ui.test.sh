@@ -124,6 +124,12 @@ assert_eq "no write path targets TODO.md"        "no"  "$(has 'writeFile(root ..
 # Auto-sync rides the refresh tick off persisted todoMeta enrollment.
 assert_eq "tick calls the auto-sync sweep"       "yes" "$(has 'FX.todoAutoSyncTick(list)')"
 assert_eq "sync stats the file mtime"            "yes" "$(has 'hs.fs.attributes(path, "modification")')"
+# 2026-09-10: hs.fs.attributes on a MISSING file returns nil + an error message, and
+# tonumber(nil, "<msg>") throws -- a worktree without a TODO.md crashed the repo import and
+# would have crashed the auto-sync tick every second (tests/worklist-worktrees.test.lua).
+# The value must be truncated to one result wherever it feeds tonumber.
+assert_eq "no stat result feeds tonumber un-truncated (missing file = nil + message)" "no" \
+  "$(has 'tonumber(hs.fs.attributes(')"
 assert_eq "payload gates the button on hasTodo/todoOn" "yes" "$(has 'curProj.hasTodo || curProj.todoOn')"
 
 # ---- Feature 6: one tab per project (2026-09-10) ------------------------------------

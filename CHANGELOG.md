@@ -4,6 +4,20 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-10 — A worktree without a TODO.md can't crash My List
+
+### Fixed — the repo import (and the auto-sync tick) threw on a missing TODO.md
+
+Caught in the live check of one-tab-per-project, before it reached a normal tick: `hs.fs.attributes`
+on a **missing** file returns `nil` **plus an error message**, and `tonumber(nil, "<message>")`
+throws ("bad argument #2 to 'tonumber'"). A repo tab reads — and records — every worktree root,
+and a worktree with no `TODO.md` is normal, so the import threw; and once such a root was
+recorded, the auto-sync tick would have thrown on it **every second**, stalling the refresh (the
+single-folder sync had the same latent crash for a `TODO.md` that vanished). Every stat that feeds
+`tonumber` now keeps only the value. `tests/worklist-worktrees.test.lua` now stubs the real
+two-value return and includes a worktree with no `TODO.md` (red before the fix, including a
+second auto-sync tick), and `worklist-ui.test.sh` forbids the un-truncated pattern.
+
 ## 2026-09-10 — My List: one tab per project across worktrees
 
 ### Added — a repo's worktrees share one My List tab, fed by every worktree's TODO.md

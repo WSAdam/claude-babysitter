@@ -21,16 +21,22 @@ local function finish() print("-- worklist-worktrees.test.lua: " .. run .. " run
 local T
 do local p = io.popen("mktemp -d 2>/dev/null"); T = p and p:read("*l"); if p then p:close() end end
 if not T or T == "" then check("mktemp a fixture dir", false); finish() end
-local MAIN, WT = T .. "/repo", T .. "/repo-fix"
-os.execute('mkdir -p "' .. T .. '/status" "' .. T .. '/.claude" "' .. MAIN .. '/.git/worktrees/repo-fix" "' .. WT .. '"')
+local MAIN, WT, UI = T .. "/repo", T .. "/repo-fix", T .. "/repo-ui"
+os.execute('mkdir -p "' .. T .. '/status" "' .. T .. '/.claude" "' .. MAIN .. '/.git/worktrees/repo-fix" "'
+  .. MAIN .. '/.git/worktrees/repo-ui" "' .. WT .. '" "' .. UI .. '"')
 local now = os.time()
 local function write(path, s) local f = io.open(path, "w"); f:write(s); f:close() end
 write(MAIN .. "/.git/HEAD", "ref: refs/heads/main\n")
 write(MAIN .. "/.git/worktrees/repo-fix/HEAD", "ref: refs/heads/fix/y\n")
+write(MAIN .. "/.git/worktrees/repo-ui/HEAD", "ref: refs/heads/ui/z\n")
 -- the repo COMMITS TODO.md, so the worktree's copy repeats main's line
 write(MAIN .. "/TODO.md", "- [ ] shared item\n")
 write(WT .. "/TODO.md", "- [ ] shared item\n- [x] fix-only item\n")
-for _, s in ipairs({ { "w1", "repo", MAIN }, { "w2", "repo-fix", WT } }) do
+-- 2026-09-10: repo-ui has a live session but NO TODO.md. hs.fs.attributes(missing,
+-- "modification") returns nil PLUS an error message, and tonumber(nil, "<msg>") throws
+-- ("bad argument #2 to 'tonumber'") -- which crashed the repo import, and would have
+-- crashed the auto-sync tick every second once the root was recorded.
+for _, s in ipairs({ { "w1", "repo", MAIN }, { "w2", "repo-fix", WT }, { "w3", "repo-ui", UI } }) do
   write(T .. "/status/" .. s[1] .. ".json", string.format(
     '{"status":"idle","session_id":"%s","name":"%s","cwd":"%s","since":%d,"updated":%d,"editor":"vscode"}',
     s[1], s[2], s[3], now, now))
@@ -63,12 +69,13 @@ local hs = {
       if p then for line in p:lines() do files[#files + 1] = line end; p:close() end
       local i = 0; return function() i = i + 1; return files[i] end
     end,
+    -- the REAL return shape: a missing path answers nil AND an error message
     attributes = function(path, attr)
       if type(path) == "string" and path:match("/TODO%.md$") and exists(path) then
         if attr == "modification" then return now - 10 end   -- changed 10s ago: past the 2s settle guard
         if attr == nil then return { mode = "file", modification = now - 10 } end
       end
-      return nil
+      return nil, "cannot obtain information from file '" .. tostring(path) .. "': No such file or directory"
     end,
     mkdir = function() return true end,
   },
@@ -79,12 +86,15 @@ local hs = {
     if cmd:find("rev-parse", 1, true) then
       if cmd:find("'" .. WT .. "'", 1, true) then
         return WT .. "\n" .. MAIN .. "/.git\n" .. MAIN .. "/.git/worktrees/repo-fix\n"
+      elseif cmd:find("'" .. UI .. "'", 1, true) then
+        return UI .. "\n" .. MAIN .. "/.git\n" .. MAIN .. "/.git/worktrees/repo-ui\n"
       elseif cmd:find("'" .. MAIN .. "'", 1, true) then
         return MAIN .. "\n" .. MAIN .. "/.git\n" .. MAIN .. "/.git\n"
       end
     elseif cmd:find("worktree list", 1, true) then
       return "worktree " .. MAIN .. "\nHEAD aaaaaaa\nbranch refs/heads/main\n\n"
-          .. "worktree " .. WT .. "\nHEAD bbbbbbb\nbranch refs/heads/fix/y\n"
+          .. "worktree " .. WT .. "\nHEAD bbbbbbb\nbranch refs/heads/fix/y\n\n"
+          .. "worktree " .. UI .. "\nHEAD ccccccc\nbranch refs/heads/ui/z\n"
     end
     return ""
   end,
@@ -152,6 +162,13 @@ check("HARD RULE: the worktree's [x] is the automation badge, never the user's c
 local f = io.open(T .. "/worklist.json"); local stored = json.decode(f:read("*a")); f:close()
 local roots = {}
 for _, r in ipairs(((stored.todoMeta or {}).K or {}).roots or {}) do roots[#roots + 1] = r.root .. (r.isMain and "*" or "") end
-check("the tab records both roots, main first (so auto-sync watches the worktree too)  (got="
-      .. table.concat(roots, ",") .. ")", table.concat(roots, ",") == MAIN .. "*," .. WT)
+check("the tab records every root, main first (so auto-sync watches the worktrees too)  (got="
+      .. table.concat(roots, ",") .. ")", table.concat(roots, ",") == MAIN .. "*," .. WT .. "," .. UI)
+
+-- the NEXT tick: auto-sync now stats every recorded root, including repo-ui's missing
+-- TODO.md -- it must shrug, not throw (a throw here froze the refresh tick every second)
+local dash = rawget(_G, "__ccDashboard")
+local tickOk, tickErr = pcall(function() dash.fx.todoAutoSyncTick(dash.fx._shownItems or {}) end)
+check("the auto-sync tick survives a watched worktree with no TODO.md", tickOk)
+if not tickOk then print("       " .. tostring(tickErr)) end
 finish()

@@ -1592,7 +1592,9 @@ function FX.todoImportProjects(entries, stArg)
         for _, rt in ipairs(e.roots) do
           meta.roots[#meta.roots + 1] = { root = rt.root, branch = rt.branch, isMain = rt.isMain or nil }
           local p = rt.root .. "/TODO.md"
-          local m = tonumber(hs.fs.attributes(p, "modification"))
+          -- (parenthesised: a MISSING file answers nil + an error message, and
+          -- tonumber(nil, "<msg>") throws "bad argument #2" -- keep only the value)
+          local m = tonumber((hs.fs.attributes(p, "modification")))
           if m then meta.mtimes[rt.root] = m; FX._todoMtime[p] = m end
         end
         meta.cwd = mainRoot or meta.cwd          -- older builds read these two
@@ -1611,7 +1613,7 @@ function FX.todoImportProjects(entries, stArg)
                                            FX.now(), FX.worklistNewId)
         meta = st.todoMeta[key]                  -- core guaranteed the container
         meta.cwd = root
-        meta.mtime = tonumber(hs.fs.attributes(root .. "/TODO.md", "modification")) or meta.mtime
+        meta.mtime = tonumber((hs.fs.attributes(root .. "/TODO.md", "modification"))) or meta.mtime
         FX._todoMtime[root .. "/TODO.md"] = meta.mtime
         r.projects = r.projects + 1
         r.added, r.updated, r.missing = r.added + c.added, r.updated + c.updated, r.missing + c.missing
@@ -1679,7 +1681,8 @@ function FX.todoAutoSyncTick(list)
   for key, paths in pairs(FX._todoWatch) do
     local due = false
     for _, path in ipairs(paths) do
-      local m = tonumber(hs.fs.attributes(path, "modification"))
+      -- parenthesised: a missing file answers nil + a message, and tonumber(nil, msg) throws
+      local m = tonumber((hs.fs.attributes(path, "modification")))
       if m and m ~= FX._todoMtime[path] and (now - m) >= 2 then due = true end
     end
     if not due and liveRoots[key] then
