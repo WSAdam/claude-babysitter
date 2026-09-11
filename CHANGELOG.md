@@ -4,6 +4,16 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — ⌘V pastes into the field you're in
+
+### Fixed — a paste into a question's Other box landed in the nudge box
+
+Hammerspoon's ⌘V tap swallows the keystroke for the whole panel (so an image can be pasted) and
+handed every text paste to the nudge box at the bottom; only the worklist editor had an exception.
+Text now goes to whichever text field has focus, at its caret, with an input event so the field's
+own handlers see it (the answer form enables Send). With no text field focused it still goes to the
+nudge box. Fixture: `tests/paste-target.test.js`.
+
 ## 2026-09-11 — Close empty chats
 
 ### Added — never-used "Claude Code" chats can be closed from the card

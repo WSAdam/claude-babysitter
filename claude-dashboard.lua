@@ -10485,6 +10485,31 @@ local HTML = [[
       el.selectionStart = el.selectionEnd = s + t.length;
       autoGrow(el);
     }
+    // ⌘V in the panel (2026-09-11). Hammerspoon's tap swallows ⌘V for the whole panel (so an
+    // image can be pasted) and used to hand every text paste to the nudge box -- a paste into a
+    // question's "Other…" box landed at the bottom. Text now goes to the focused text field, at
+    // its caret, with an input event so the field's own handlers see it; nudge box otherwise.
+    function pasteTextTarget(el){
+      if(!el || el.disabled || el.readOnly) return null;
+      var tag = String(el.tagName || "").toUpperCase();
+      if(tag === "TEXTAREA") return el;
+      if(tag === "INPUT"){
+        var ty = String(el.type || "text").toLowerCase();
+        return (ty === "text" || ty === "search" || ty === "url" || ty === "email" || ty === "") ? el : null;
+      }
+      return null;
+    }
+    window.ccPasteText = function(t){
+      t = String(t == null ? "" : t);
+      var el = pasteTextTarget(document.activeElement);
+      if(!el || el.id === "nudge"){ insertIntoNudge(t); return; }
+      var v = String(el.value || "");
+      var s  = (typeof el.selectionStart === "number") ? el.selectionStart : v.length;
+      var en = (typeof el.selectionEnd   === "number") ? el.selectionEnd   : v.length;
+      el.value = v.slice(0, s) + t + v.slice(en);
+      el.selectionStart = el.selectionEnd = s + t.length;
+      el.dispatchEvent(new Event("input", { bubbles:true }));
+    };
 
     function onThemeChange(){
       var t = document.getElementById("theme").value;
@@ -15966,7 +15991,8 @@ local function handlePanelPaste()
     return
   end
   if txt and #txt > 0 then
-    wv:evaluateJavaScript("insertIntoNudge(" .. jsString(txt) .. ")")
+    -- the focused text field gets it (a question's Other box...), else the nudge box (2026-09-11)
+    wv:evaluateJavaScript("ccPasteText(" .. jsString(txt) .. ")")
     print("[cc-dashboard] ⌘V: inserted text len=" .. #txt)
   elseif img then
     local ok, durl = pcall(function() return img:encodeAsURLString() end)

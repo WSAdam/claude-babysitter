@@ -119,6 +119,9 @@ echo ""
 echo "== node: a card waiting on Adam says Needs you (behavioral, runs the shipped status helpers) =="
 node "$DIR/needs-you.test.js" || fail=1
 echo ""
+echo "== node: ⌘V lands in the focused field, not the nudge box (behavioral, runs the shipped paste helpers) =="
+node "$DIR/paste-target.test.js" || fail=1
+echo ""
 echo "== lua: New worktree tab opens a prefilled Claude tab, never a keystroke (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/new-worktree-tab.test.lua" || fail=1
 echo ""
