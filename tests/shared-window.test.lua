@@ -216,4 +216,16 @@ local _, lone = quiet(function() return fx.pasteIntoWindow(fx.targetFor(b1), { t
 check("a session alone in its window is still typed into (its window focused, the paste scheduled)",
       lone == true and focusCalls == 1 and not logged("NOT sent to"))
 check("the router never picks a shared-window session", not core.sessionFree(a1) and core.sessionFree(b1))
+
+-- 2026-09-11: Jump brings the session's own tab forward through the tab bridge -- Adam's second
+-- Focus in a two-tab window landed on the other tab's chat.
+registry({ "Twin", "Solo" })
+for _, n in ipairs(inbox()) do os.remove(BR .. "/500.in/" .. n) end
+local before = focusCalls
+local _, jumped = quiet(function() return core.handleAction(fx, a1, "focus") end)
+local sel = inbox()
+local sc = sel[1] and json.decode(io.open(BR .. "/500.in/" .. sel[1]):read("*a")) or {}
+check("Jump focuses the window, then asks its tab bridge to bring the session's tab forward  (op=" .. tostring(sc.op) .. " label=" .. tostring(sc.label) .. ")",
+      jumped == "focus" and focusCalls == before + 1 and #sel == 1 and sc.op == "select" and sc.label == "Solo")
+check("...still without a keystroke", taps == 0)
 finish()

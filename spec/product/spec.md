@@ -156,6 +156,13 @@ conflicts with the tests, fast-forwards main and runs `cc-merge.sh done` (which 
 worktree and branch only once the branch is in main, never forced) — one merge per repo at a time,
 in click order. Shepherd re-verifies with git before the tab bridge closes the tab. **[DECISION D-16]**
 
+Jump lands on the **exact tab** after all — through the tab bridge, not the Claude URI. The bridge's
+second op, `select` (by name, single match only), focuses the tab's editor group and opens the tab
+at its index (`workbench.action.focus<Nth>EditorGroup` + `workbench.action.openEditorAtIndex`):
+pure tab switching, so D-14's resume-a-live-session risk can't arise. A wrong pick only shows
+another tab, so select may use any of a session's names; **close keeps the strict one**. Any window
+still on an older bridge just lands on the window (Doctor says to reload it). **[DECISION D-17]**
+
 ## 6. Observability (local, derived, zero extra hooks)
 
 All from the transcript Shepherd already tails — **no extra hooks, no model tokens**:

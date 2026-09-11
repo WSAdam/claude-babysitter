@@ -79,6 +79,15 @@ const bad = [
 ];
 for (const [what, cmd] of bad) check("command: refuses " + what, !lib.validateCommand(cmd, now).ok);
 
+// 2026-09-11: a second op, select -- Focus lands on the session's own tab
+check("command: select by name is accepted too", lib.validateCommand(Object.assign({}, good, { op: "select" }), now).ok === true);
+check("tabs carry their group and index (what select needs)", tabs[2].gi === 1 && tabs[2].ti === 1 && tabs[0].gi === 0 && tabs[0].ti === 0);
+const sc = lib.selectCommands(1, 2);
+check("select: focus the tab's group, then open the tab at its index",
+      sc.length === 2 && sc[0].id === "workbench.action.focusSecondEditorGroup"
+      && sc[1].id === "workbench.action.openEditorAtIndex" && sc[1].args[0] === 2);
+check("select: a group past the eighth can't be focused by command -> refused", lib.selectCommands(8, 0) === null);
+
 check("pick: exactly one tab with the name is picked", lib.pickExactlyOne(tabs, "Fix sibling window").hit === tabs[0]);
 const none = lib.pickExactlyOne(tabs, "Nope");
 check("pick: no tab with the name -> a reason naming it", !none.hit && /no Claude tab named "Nope"/.test(none.reason));
@@ -94,11 +103,29 @@ const liveGroups = [
 ];
 const closed = [];
 const subs = [];
+const executed = [];
+const GROUP_CMDS = ["First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth"]
+  .map((n) => "workbench.action.focus" + n + "EditorGroup");
+let focusedGroup = 0;
+const groupOf = (g) => Object.defineProperty(g, "activeTab", { get() { return this.tabs.find((t) => t.isActive); } });
+groupOf(liveGroups[0]);
 const fakeVscode = {
   TabInputWebview, TabInputText,
+  commands: {
+    executeCommand: async (id, ...args) => {
+      executed.push([id].concat(args).join(":"));
+      const gi = GROUP_CMDS.indexOf(id);
+      if (gi >= 0) focusedGroup = gi;
+      if (id === "workbench.action.openEditorAtIndex") {
+        const g = liveGroups[focusedGroup];
+        if (g) g.tabs.forEach((t, i) => { t.isActive = (i === args[0]); });
+      }
+    },
+  },
   window: {
     tabGroups: {
       get all() { return liveGroups; },
+      get activeTabGroup() { return liveGroups[focusedGroup]; },
       close: async (tab) => {
         closed.push(tab.label);
         liveGroups[0].tabs = liveGroups[0].tabs.filter((t) => t !== tab);
@@ -120,13 +147,14 @@ const ext = require(EXT);
 Module._load = realLoad;
 
 (async () => {
-  const ctx = { subscriptions: subs, extension: { packageJSON: { version: "0.1.0" } } };
+  const pkg = require(path.join(__dirname, "..", "vscode-bridge", "package.json"));
+  const ctx = { subscriptions: subs, extension: { packageJSON: pkg } };
   ext.activate(ctx);
   const regFile = path.join(DIR, process.pid + ".json");
   check("activate writes this window's registry, named by the extension host pid", fs.existsSync(regFile));
   const r = JSON.parse(fs.readFileSync(regFile, "utf8"));
   eq("...listing its Claude tabs only", r.tabs.length, 3);
-  eq("...and its version", r.version, "0.1.0");
+  eq("...and its version (from package.json)", r.version, pkg.version);
   const inbox = path.join(DIR, process.pid + ".in"), outbox = path.join(DIR, process.pid + ".out");
   check("the inbox and outbox exist", fs.existsSync(inbox) && fs.existsSync(outbox));
   eq("...private to this user (0700)", (fs.statSync(inbox).mode & 0o777).toString(8), "700");
@@ -159,6 +187,25 @@ Module._load = realLoad;
 
   ext._test.writeRegistry();
   eq("the registry follows the closed tab", JSON.parse(fs.readFileSync(regFile, "utf8")).tabs.length, 2);
+
+  // select: two groups, the wanted tab second in the second group
+  liveGroups.length = 0;
+  liveGroups.push(groupOf({ viewColumn: 1, tabs: [claudeTab("Alpha", true)] }));
+  liveGroups.push(groupOf({ viewColumn: 2, tabs: [claudeTab("Beta", true), claudeTab("Gamma")] }));
+  send({ v: 1, id: "s1", op: "select", label: "Gamma", at: at() });
+  await ext._test.processInbox();
+  eq("select: focuses the second group, then opens tab index 1",
+     executed.join(" > "), "workbench.action.focusSecondEditorGroup > workbench.action.openEditorAtIndex:1");
+  check("select: ...and reports it's in front", (result("s1") || {}).ok === true && liveGroups[1].tabs[1].isActive === true);
+  check("select: nothing was closed", closed.length === 1);
+  executed.length = 0;
+  liveGroups[0].tabs.push(claudeTab("Beta"));
+  send({ v: 1, id: "s2", op: "select", label: "Beta", at: at() });
+  send({ v: 1, id: "s3", op: "select", label: "Nope", at: at() });
+  await ext._test.processInbox();
+  check("select: two tabs sharing the name -> refused, no command run", (result("s2") || {}).ok === false && executed.length === 0);
+  check("select: no tab with the name -> refused", (result("s3") || {}).ok === false);
+  eq("the registry reports the bridge's version", JSON.parse(fs.readFileSync(regFile, "utf8")).version, "0.2.0");
 
   ext.deactivate();
   check("deactivate removes the registry (Shepherd stops trusting this window)", !fs.existsSync(regFile));

@@ -243,10 +243,13 @@ Each refusal is logged and raises an alert (at most once a minute per session); 
 detail panel greys those controls and says how many sessions share the window. **Jump**,
 **hands-free approvals** (the gate's decision file), Queue add, Gate and Policy still work, and
 kitty sessions are unaffected. A queued task simply waits. `keystrokes.refuseSharedWindow:
-false` in `~/.claude/cc-config.json` turns the guard off. Jump brings the session's *window*
-forward, not its tab — pick the tab by its chat title. (Revealing the exact tab through the Claude
-extension's URI was tried and dropped: for a session in the Claude sidebar it would start a second
-Claude process on the same session — see decision D-14 in `spec/product/spec.md`.)
+false` in `~/.claude/cc-config.json` turns the guard off. **Jump** (and double-click, and Focus in
+Instances) brings the session's window forward and then asks that window's tab bridge to bring
+**the session's own tab** to the front — when one of its names (custom title, AI title, first
+prompt) picks out exactly one Claude tab there; otherwise you land on the window as before.
+(Revealing the tab through the Claude extension's URI was tried and dropped: for a session in the
+Claude sidebar it would start a second Claude process — see D-14; the tab bridge only switches
+tabs, see D-17 in `spec/product/spec.md`.)
 
 **Sessions with no tab.** Starting a new conversation in a Claude tab can leave the old
 session's `claude` process running with no tab of its own. Where the tab bridge runs and a window

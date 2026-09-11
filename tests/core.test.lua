@@ -8685,6 +8685,52 @@ do
   row = nil
   for _, x in ipairs(rows) do if x.label:find("bridge", 1, true) then row = x end end
   check("doctor: every window covered is ok", row and row.status == "ok")
+
+  -- 2026-09-11: select -- Focus brings the session's own tab to the front (Adam's second Focus
+  -- in a two-tab window landed on the other tab's chat)
+  local fr = newRecorder()
+  local selected = {}
+  fr.fx.selectTab = function(it) selected[#selected + 1] = it.key end
+  core.handleAction(fr.fx, vs({ key = "sel" }), "focus")
+  eq("focus: once the window is in front, the bridge is asked for the session's own tab", selected[1], "sel")
+  fr = newRecorder()
+  fr.fx.focusWindow = function() return false end
+  selected = {}
+  fr.fx.selectTab = function(it) selected[#selected + 1] = it.key end
+  core.handleAction(fr.fx, vs({ key = "miss" }), "focus")
+  check("focus: a jump that missed the window asks for no tab", #selected == 0)
+  local sreg = { at = 995, tabs = { { label = "from your printed guide …" }, { label = "Claude Code" }, { label = "Claude Code" } } }
+  eq("select: the first of the session's names that names exactly one tab",
+     core.tabBridgeSelectLabel(sreg, { "Project onboarding", "from your printed guide …" }, now), "from your printed guide …")
+  check("select: a name shared by two tabs never picks one", core.tabBridgeSelectLabel(sreg, { "Claude Code" }, now) == nil)
+  check("select: a stale registry picks nothing", core.tabBridgeSelectLabel({ at = 1, tabs = sreg.tabs }, { "from your printed guide …" }, now) == nil)
+  eq("select: the command names its op", core.tabBridgeCommand("k", "x", 5, "select").op, "select")
+  eq("close: ...and close stays the default", core.tabBridgeCommand("k", "x", 5).op, "close")
+
+  local oldCov = core.tabBridgeCoverage(list, { ["500"] = { at = 995, tabs = {}, version = "0.1.0" },
+                                                ["600"] = { at = 995, tabs = {}, version = "0.2.0" } }, now, "0.2.0")
+  eq("coverage: names a window still running an older tab bridge", oldCov.outdated and oldCov.outdated[1], "s")
+  rows = core.doctorChecks({ tabBridge = oldCov })
+  row = nil
+  for _, x in ipairs(rows) do if x.label:find("older", 1, true) then row = x end end
+  check("doctor: an older tab bridge is a warning that says to reload that window",
+        row and row.status == "warn" and (row.fix or ""):find("Reload Window", 1, true))
+
+  -- 2026-09-11: Instances offered Open on the main checkout (whose window is the one the tabs
+  -- live in) once every tab had entered a worktree
+  local p = core.instancesPayload("repo:/r/main/.git",
+    { { key = "a", wtRoot = "/r/main/.claude/worktrees/a", originDir = "/r/main", status = "done" } }, {},
+    { { path = "/r/main", branch = "main" }, { path = "/r/main/.claude/worktrees/idle", branch = "fix/idle" } },
+    { mainRoot = "/r/main" })
+  local listed = {}
+  for _, w in ipairs(p.worktrees) do listed[w.path] = true end
+  check("Instances: the main checkout isn't offered to Open while a tab lives in its window", not listed["/r/main"])
+  check("Instances: ...an idle worktree still is", listed["/r/main/.claude/worktrees/idle"] == true)
+  p = core.instancesPayload("repo:/r/main/.git",
+    { { key = "a", wtRoot = "/r/main-a", originDir = "/r/main-a", status = "done" } }, {},
+    { { path = "/r/main", branch = "main" } }, { mainRoot = "/r/main" })
+  check("Instances: with every session in a sibling window, the main checkout can still be opened",
+        p.worktrees[1] and p.worktrees[1].path == "/r/main")
 end
 
 -- ---- New worktree tab: a Claude tab that starts its own worktree (2026-09-10) ----

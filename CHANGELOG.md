@@ -4,6 +4,28 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — Jump lands on the session's own tab
+
+### Added — the tab bridge brings a tab to the front
+
+With two Claude tabs in one window, Focus on the second one landed on the first one's chat: Jump
+only brought the window forward. The tab bridge (now 0.2.0) takes a second command, `select`: by
+name, single match only, it focuses the tab's editor group and opens the tab at its index — tab
+switching through VS Code's own commands, never the Claude URI (so D-14's duplicate-session risk
+doesn't apply). After a Jump, double-click or Instances Focus lands on the window, Shepherd asks for
+the first of the session's names (custom title, AI title, first prompt) that picks out exactly one
+tab; a refusal is only logged. Doctor lists windows still running an older bridge (a reload picks
+up the new one). Fixtures: `tests/bridge.test.js` (the select commands, group and index, refusals,
+version), `tests/core.test.lua` and `tests/shared-window.test.lua` (Jump sends select after the
+window lands, no keystroke).
+
+### Fixed — Instances offered to Open the window the tabs live in
+
+Once every tab had entered a worktree, Instances listed the main checkout under "Worktrees with no
+session" with an Open button — for the window those tabs are in. It's left out now while any
+session lives in the main checkout's window; with every session in a sibling window it can still be
+opened. Fixture: `tests/core.test.lua` (red before).
+
 ## 2026-09-11 — A tab showing its first prompt is not "no tab"
 
 ### Fixed — the tab-less marker flagged a real, open tab

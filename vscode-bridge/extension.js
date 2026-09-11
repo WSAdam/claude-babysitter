@@ -1,9 +1,10 @@
 // extension.js - the Shepherd bridge: runs inside this VS Code window's extension host
 // (the same process as the window's Claude tabs, so process.pid == Shepherd's
-// host_window) and lets Shepherd close ONE Claude tab by name, with no keystrokes.
+// host_window) and lets Shepherd close ONE Claude tab by name, or bring it to the front
+// (select), with no keystrokes.
 //
 //   <dir>/<pid>.json        registry: this window's Claude tabs (on change + every 15s)
-//   <dir>/<pid>.in/<id>.json   commands from Shepherd (only "close")
+//   <dir>/<pid>.in/<id>.json   commands from Shepherd ("close" or "select", both by name)
 //   <dir>/<pid>.out/<id>.json  results for Shepherd
 //
 // <dir> is ~/.claude/cc-bridge (CC_BRIDGE_DIR overrides it for tests).
@@ -87,6 +88,20 @@ async function processInbox() {
       if (!pick.hit) {
         log("⚠️ didn't close \"" + v.cmd.label + "\": " + pick.reason);
         answer(id, { ok: false, reason: pick.reason });
+        continue;
+      }
+      if (v.cmd.op === "select") {
+        const cmds = lib.selectCommands(pick.hit.gi, pick.hit.ti);
+        if (!cmds) { answer(id, { ok: false, reason: "the tab is in an editor group past the eighth" }); continue; }
+        try {
+          for (const c of cmds) await vscode.commands.executeCommand(c.id, ...c.args);
+          const g = vscode.window.tabGroups.activeTabGroup;
+          const front = !!(g && g.activeTab && g.activeTab.label === v.cmd.label);
+          log((front ? "✅ brought forward" : "⚠️ couldn't bring forward") + " the Claude tab \"" + v.cmd.label + "\"");
+          answer(id, front ? { ok: true } : { ok: false, reason: "VS Code didn't bring the tab to the front" });
+        } catch (e) {
+          answer(id, { ok: false, reason: "select failed: " + e.message });
+        }
         continue;
       }
       try {

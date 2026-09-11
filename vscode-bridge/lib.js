@@ -16,14 +16,24 @@ function isClaudeTab(tab) {
 // Every Claude tab across the window's groups, with what Shepherd needs to name it.
 function claudeTabs(groups) {
   const out = [];
-  for (const g of groups || []) {
-    for (const tab of (g && g.tabs) || []) {
+  (groups || []).forEach((g, gi) => {
+    ((g && g.tabs) || []).forEach((tab, ti) => {
       if (isClaudeTab(tab)) {
-        out.push({ tab, label: String(tab.label || ""), group: g.viewColumn ?? null, active: !!tab.isActive });
+        out.push({ tab, label: String(tab.label || ""), group: g.viewColumn ?? null, active: !!tab.isActive, gi, ti });
       }
-    }
-  }
+    });
+  });
   return out;
+}
+
+// select: VS Code has no "reveal this tab" API for another extension's webview, but these two
+// commands do it -- focus the tab's editor group, then open the editor at its index in the
+// active group. Groups past the eighth have no focus command -> null (refused).
+const GROUP_FOCUS = ["First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth"]
+  .map((n) => "workbench.action.focus" + n + "EditorGroup");
+function selectCommands(gi, ti) {
+  if (!Number.isInteger(gi) || !Number.isInteger(ti) || gi < 0 || ti < 0 || gi >= GROUP_FOCUS.length) return null;
+  return [{ id: GROUP_FOCUS[gi], args: [] }, { id: "workbench.action.openEditorAtIndex", args: [ti] }];
 }
 
 // The registry file Shepherd reads: which Claude tabs this window has, stamped so a
@@ -36,11 +46,11 @@ function registryFor(pid, tabs, folders, version, nowMs) {
   };
 }
 
-// Only one command exists: close a Claude tab by label. Anything else is refused.
+// Two commands exist, both by label: close a Claude tab, or bring it to the front (select).
 function validateCommand(cmd, nowMs) {
   if (!cmd || typeof cmd !== "object") return { error: "not a command" };
   if (cmd.v !== 1) return { error: "unknown command version" };
-  if (cmd.op !== "close") return { error: "unknown op" };
+  if (cmd.op !== "close" && cmd.op !== "select") return { error: "unknown op" };
   if (typeof cmd.id !== "string" || !ID_RE.test(cmd.id)) return { error: "bad id" };
   if (typeof cmd.label !== "string" || cmd.label === "" || cmd.label.length > 200) return { error: "bad label" };
   const at = Number(cmd.at), now = nowMs / 1000;
@@ -55,4 +65,4 @@ function pickExactlyOne(tabs, label) {
   return { reason: `${hits.length} Claude tabs share the name "${label}"` };
 }
 
-module.exports = { CLAUDE_VIEW, ID_RE, isClaudeTab, claudeTabs, registryFor, validateCommand, pickExactlyOne };
+module.exports = { CLAUDE_VIEW, ID_RE, isClaudeTab, claudeTabs, registryFor, validateCommand, pickExactlyOne, selectCommands };

@@ -1157,7 +1157,8 @@ function FX.doctorStatus()
   end
   for hw, r in pairs(regs) do if r == false then regs[hw] = nil end end
   return core.doctorChecks({
-    tabBridge = (core.config(cfg, "tabBridge.enabled", true) ~= false) and core.tabBridgeCoverage(live, regs, os.time()) or nil,
+    tabBridge = (core.config(cfg, "tabBridge.enabled", true) ~= false)
+      and core.tabBridgeCoverage(live, regs, os.time(), ((FX.readFile(FX.TAB_BRIDGE_DIR .. "/.installed") or ""):gsub("%s+", ""))) or nil,
     jq = hasTool("jq"),
     hooksWired = hooksWired, hooksTotal = #core.OUR_HOOK_SCRIPTS,
     scriptsInstalled = exists(CLAUDE_DIR .. "/cc-status.sh") and exists(CLAUDE_DIR .. "/cc-approve.sh"),
@@ -2622,7 +2623,7 @@ function FX.closeTab(it, opts)
   if not FX.writeFileAtomic(file, core.json.encode(cmd)) then
     return refuse("couldn't write to the bridge's inbox")
   end
-  FX._tabBridgePending[cmd.id] = { key = it.key, hw = hw, label = label, name = name, at = FX.now() }
+  FX._tabBridgePending[cmd.id] = { op = "close", key = it.key, hw = hw, label = label, name = name, at = FX.now() }
   print("[cc-dashboard] 🚀 asked the Shepherd tab bridge (host " .. hw .. ") to close the tab \"" .. label .. "\" (" .. name .. ")")
   if not FX._tabBridgeTimer then
     FX._tabBridgeTimer = hs.timer.doEvery(0.5, function()
@@ -2643,7 +2644,10 @@ function FX.tabBridgePollResults()
       os.remove(resFile)
       FX._tabBridgePending[id] = nil
       local ok, res = pcall(function() return core.json.decode(raw) end)
-      if ok and type(res) == "table" and res.ok == true then
+      if p.op == "select" then   -- bringing a tab forward: logged, never alerted
+        print("[cc-dashboard] " .. ((ok and type(res) == "table" and res.ok == true) and "✅ brought forward" or "⚠️ couldn't bring forward")
+          .. " '" .. p.name .. "'s tab \"" .. p.label .. "\"" .. ((ok and type(res) == "table" and res.reason) and (": " .. tostring(res.reason)) or ""))
+      elseif ok and type(res) == "table" and res.ok == true then
         print("[cc-dashboard] ✅ the Shepherd tab bridge closed '" .. p.name .. "' (tab \"" .. p.label .. "\")")
         FX.removeStatus(p.key)
       else
@@ -2654,8 +2658,12 @@ function FX.tabBridgePollResults()
     elseif FX.now() - (p.at or 0) >= FX.TAB_BRIDGE_ANSWER_WAIT then
       os.remove(FX.TAB_BRIDGE_DIR .. "/" .. p.hw .. ".in/" .. id .. ".json")
       FX._tabBridgePending[id] = nil
-      print("[cc-dashboard] ⚠️ the Shepherd tab bridge (host " .. p.hw .. ") didn't answer -- close of '" .. p.name .. "' withdrawn")
-      pcall(function() hs.alert.show("The Shepherd tab bridge didn't answer, so " .. p.name .. "'s tab is still open.") end)
+      if p.op == "select" then
+        print("[cc-dashboard] ⚠️ the tab bridge didn't answer a select for '" .. p.name .. "'")
+      else
+        print("[cc-dashboard] ⚠️ the Shepherd tab bridge (host " .. p.hw .. ") didn't answer -- close of '" .. p.name .. "' withdrawn")
+        pcall(function() hs.alert.show("The Shepherd tab bridge didn't answer, so " .. p.name .. "'s tab is still open.") end)
+      end
     end
   end
 end
@@ -2671,23 +2679,51 @@ FX._tabLabels = {}   -- key -> { names, at }: a transcript grep + head + tail at
 
 -- Every name this session's tab could be showing (custom title, AI title, first prompt, last
 -- prompt -- core.claudeTabCandidates). nil when there's no transcript to read.
+function FX.sessionTabCandidates(it)
+  local path = it and it.transcript_path
+  if type(path) ~= "string" or path == "" then return nil end
+  local custom, head
+  pcall(function()
+    local q = "'" .. path:gsub("'", "'\\''") .. "'"
+    custom = hs.execute("grep -F '\"type\":\"custom-title\"' " .. q .. " 2>/dev/null | tail -n 3")
+  end)
+  pcall(function() local f = io.open(path, "rb"); if f then head = f:read(16384); f:close() end end)
+  return core.claudeTabCandidates({
+    custom = core.claudeTabTitle(custom, nil), ai = core.aiTitleFromTranscript(FX.readTail(path, 131072)),
+    first = core.firstPromptFromTranscript(head), last = it.last_prompt })
+end
+
 function FX.cachedTabCandidates(it)
   local c, now = FX._tabLabels[it.key], FX.now()
   if c and now - c.at < 30 then return c.names end
-  local path, names = it.transcript_path, nil
-  if type(path) == "string" and path ~= "" then
-    local custom, head
-    pcall(function()
-      local q = "'" .. path:gsub("'", "'\\''") .. "'"
-      custom = hs.execute("grep -F '\"type\":\"custom-title\"' " .. q .. " 2>/dev/null | tail -n 3")
-    end)
-    pcall(function() local f = io.open(path, "rb"); if f then head = f:read(16384); f:close() end end)
-    names = core.claudeTabCandidates({
-      custom = core.claudeTabTitle(custom, nil), ai = core.aiTitleFromTranscript(FX.readTail(path, 131072)),
-      first = core.firstPromptFromTranscript(head), last = it.last_prompt })
-  end
+  local names = FX.sessionTabCandidates(it)
   FX._tabLabels[it.key] = { names = names, at = now }
   return names
+end
+
+-- After a Jump lands on a VS Code window: ask its tab bridge to bring this session's own tab
+-- forward (core.handleAction calls this). Quiet -- a refusal is logged, never alerted; the
+-- window is already in front either way. Names are read fresh (a Jump is a rare, human action).
+function FX.selectTab(it)
+  if type(it) ~= "table" or it.remote or it.editor == "kitty" or it.editor == "terminal" then return false end
+  if core.config(loadConfig(), "tabBridge.enabled", true) == false then return false end
+  local hw = tostring(it.host_window or "")
+  local label, why = core.tabBridgeSelectLabel(FX.tabBridgeRegistry(hw), FX.sessionTabCandidates(it), FX.now())
+  if not label then
+    print("[cc-dashboard] ⚠️ no tab select for '" .. tostring(it.label or it.name) .. "': " .. tostring(why))
+    return false
+  end
+  local cmd = core.tabBridgeCommand(it.key, label, FX.now(), "select")
+  if not FX.writeFileAtomic(FX.TAB_BRIDGE_DIR .. "/" .. hw .. ".in/" .. cmd.id .. ".json", core.json.encode(cmd)) then return false end
+  FX._tabBridgePending[cmd.id] = { op = "select", key = it.key, hw = hw, label = label,
+                                   name = tostring(it.label or it.name or "?"), at = FX.now() }
+  if not FX._tabBridgeTimer then
+    FX._tabBridgeTimer = hs.timer.doEvery(0.5, function()
+      FX.tabBridgePollResults()
+      if next(FX._tabBridgePending) == nil and FX._tabBridgeTimer then FX._tabBridgeTimer:stop(); FX._tabBridgeTimer = nil end
+    end)
+  end
+  return true
 end
 
 function FX.annotateTabless(list, cfg)

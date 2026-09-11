@@ -289,7 +289,11 @@ function M.handleAction(fx, item, action, text)
   if action == "focus" then
     -- A jump that landed marks the instance seen: a finished one stops leading its
     -- project card until it finishes again (M.instanceTier). A miss marks nothing.
-    if fx.focusWindow(tgt) ~= false and fx.markSeen then fx.markSeen(item.key) end
+    if fx.focusWindow(tgt) ~= false then
+      if fx.markSeen then fx.markSeen(item.key) end
+      -- 2026-09-11: the window is in front; the tab bridge brings the session's own tab forward
+      if fx.selectTab then fx.selectTab(item) end
+    end
   elseif action == "approve" then
     -- R1-26: approve only via the decision file for a remote tile, and only while
     -- the gate is waiting -- never fall through to actOnWindow on a local window
@@ -701,11 +705,26 @@ function M.tabBridgeCloseVerdict(reg, label, now)
   return true
 end
 
--- The one command the bridge takes. The id becomes a file name in its outbox.
-function M.tabBridgeCommand(key, label, now)
+-- A bridge command: close (default) or select, by label. The id becomes a file name in its outbox.
+function M.tabBridgeCommand(key, label, now, op)
   local safe = tostring(key or "s"):gsub("[^%w._-]", "_"):sub(1, 40)
-  return { v = 1, id = safe .. "-" .. tostring(math.floor(tonumber(now) or 0)), op = "close",
+  return { v = 1, id = safe .. "-" .. tostring(math.floor(tonumber(now) or 0)), op = (op == "select") and "select" or "close",
            label = label, at = math.floor(tonumber(now) or 0) }
+end
+
+-- Which name to ask the bridge to bring forward: the first of the session's possible tab names
+-- (core.claudeTabCandidates) that names exactly ONE tab in a fresh registry. Bringing a tab
+-- forward is harmless, so the looser name list is fine here (close stays on the strict label).
+function M.tabBridgeSelectLabel(reg, names, now)
+  if type(reg) ~= "table" or type(reg.tabs) ~= "table" then return nil, "no tab bridge in that window" end
+  if (tonumber(now) or 0) - (tonumber(reg.at) or 0) > M.TAB_BRIDGE_FRESH then return nil, "its tab bridge stopped reporting" end
+  if type(names) == "string" then names = { names } end
+  for _, n in ipairs(type(names) == "table" and names or {}) do
+    local count = 0
+    for _, t in ipairs(reg.tabs) do if type(t) == "table" and t.label == n then count = count + 1 end end
+    if count == 1 then return n end
+  end
+  return nil, "no name of its names picks out one tab"
 end
 
 -- ---- Tab-less sessions (2026-09-11) -----------------------------------------------
@@ -814,7 +833,7 @@ end
 -- Doctor: the VS Code windows hosting sessions (by host_window) vs the ones with a fresh
 -- bridge registry. Kitty and remote tiles have no VS Code window here. `registries` maps
 -- host pid -> decoded registry (or nil). Returns { windows, covered, missing = {names} }.
-function M.tabBridgeCoverage(list, registries, now)
+function M.tabBridgeCoverage(list, registries, now, want)
   local names, order = {}, {}
   for _, it in ipairs(list or {}) do
     if type(it) == "table" and not it.remote and it.editor ~= "kitty" and it.editor ~= "terminal" then
@@ -822,16 +841,18 @@ function M.tabBridgeCoverage(list, registries, now)
       if hw ~= "" and not names[hw] then names[hw] = tostring(it.name or hw); order[#order + 1] = hw end
     end
   end
-  local covered, missing = 0, {}
+  local covered, missing, outdated = 0, {}, {}
   for _, hw in ipairs(order) do
     local reg = type(registries) == "table" and registries[hw] or nil
     if type(reg) == "table" and (tonumber(now) or 0) - (tonumber(reg.at) or 0) <= M.TAB_BRIDGE_FRESH then
       covered = covered + 1
+      -- a window still running an older bridge (an update needs Developer: Reload Window)
+      if want and tostring(reg.version or "") ~= tostring(want) then outdated[#outdated + 1] = names[hw] end
     else
       missing[#missing + 1] = names[hw]
     end
   end
-  return { windows = #order, covered = covered, missing = missing }
+  return { windows = #order, covered = covered, missing = missing, outdated = outdated }
 end
 
 -- Which projectKeys have MORE THAN ONE live session right now. Only those tiles
@@ -1233,6 +1254,16 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
     if af ~= bf then return af < bf end
     return tostring(a.key) < tostring(b.key)
   end)
+  -- 2026-09-11: the main checkout isn't "a worktree with no session" while a tab lives in its
+  -- window (every tab had entered a worktree, so Instances offered to Open the window they're in)
+  local mainHosts = false
+  for _, it in ipairs(members or {}) do
+    if opts.mainRoot and type(it.originDir) == "string" and M.normDir(it.originDir) == opts.mainRoot then mainHosts = true end
+  end
+  for _, it in ipairs(hidden or {}) do
+    if opts.mainRoot and type(it.originDir) == "string" and M.normDir(it.originDir) == opts.mainRoot then mainHosts = true end
+  end
+  if mainHosts then taken[opts.mainRoot] = true end
   local idle = {}
   for _, w in ipairs(worktrees or {}) do
     if type(w) == "table" and w.path and not w.bare and not w.prunable and not taken[M.normDir(w.path)] then
@@ -11272,6 +11303,12 @@ function M.doctorChecks(facts)
       add("Shepherd tab bridge missing in " .. #miss .. " VS Code window" .. ((#miss == 1) and "" or "s"), "warn",
           "no bridge in: " .. table.concat(miss, ", ") .. " -- Close on its shared-window tabs stays refused",
           "Developer: Reload Window in that window (or run: make tab-bridge)")
+    end
+    local old = type(br.outdated) == "table" and br.outdated or {}
+    if #old > 0 then
+      add("An older tab bridge runs in " .. #old .. " VS Code window" .. ((#old == 1) and "" or "s"), "warn",
+          "still on the previous version: " .. table.concat(old, ", ") .. " -- Focus there lands on the window, not the tab",
+          "Developer: Reload Window in that window")
     end
   end
 
