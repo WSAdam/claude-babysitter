@@ -23,6 +23,14 @@ the branch is in main and never forces either. Fixtures: `tests/merge.test.sh` (
 `tests/merge-request.test.lua` (the real dashboard: one alert per request, nonce-bound decisions,
 the per-repo queue, no keystrokes).
 
+### Fixed — `make reload` could block a deploy for good
+
+The reload drops Hammerspoon's IPC port; an `hs -c` client caught mid-reply then waited forever
+(a deploy sat 10 minutes on it — `hs -t` doesn't cover it). The reload is already scheduled by
+the time the client would answer, so `make reload` now waits about 10 s and then stops a hung
+client, saying so. Fixture: `tests/install.test.sh` with a fake `hs` that hangs (red before: the
+recipe blocked for the fake's full 300 s), one that succeeds and one that fails.
+
 ### Fixed — `make install` rewrote running hook scripts in place
 
 `make install` copied the hook scripts with `cp`, which rewrites a file in place — and bash reads

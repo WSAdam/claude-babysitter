@@ -393,4 +393,27 @@ ls -a "$MCDIR" | grep -q '\.tmp\.' && got=leftovers || got=clean
 assert_eq "make install: leaves no temp files behind" "clean" "$got"
 exists "install.sh: ships cc-merge.sh too" "$CDIR/cc-merge.sh"
 
+# ---- make reload never blocks a deploy (2026-09-11) ----
+# The reload drops Hammerspoon's IPC port; an `hs -c` caught mid-reply then waited forever
+# (a deploy sat 10 minutes on it). The recipe waits ~10s at most, then stops the client.
+FAKEBIN="$TMP/fakehs"; mkdir -p "$FAKEBIN"
+printf '#!/bin/sh\nsleep 300\n' > "$FAKEBIN/hs"; chmod +x "$FAKEBIN/hs"
+start=$(date +%s)
+out="$(PATH="$FAKEBIN:$PATH" make -C "$ROOT" --no-print-directory reload 2>&1)"
+took=$(( $(date +%s) - start ))
+[ "$took" -le 15 ] && got=returned || got="blocked ${took}s"
+assert_eq "make reload: a hung hs CLI can't block it" "returned" "$got"
+case "$out" in *"hung"*) got=says ;; *) got=silent ;; esac
+assert_eq "make reload: ...and it says the CLI hung" "says" "$got"
+pgrep -f "$FAKEBIN/hs" >/dev/null && got=left || got=stopped
+assert_eq "make reload: ...the hung client is stopped" "stopped" "$got"
+printf '#!/bin/sh\nexit 0\n' > "$FAKEBIN/hs"
+out="$(PATH="$FAKEBIN:$PATH" make -C "$ROOT" --no-print-directory reload 2>&1)"
+case "$out" in *"Hammerspoon reloading (config re-read)"*) got=ok ;; *) got="$out" ;; esac
+assert_eq "make reload: a normal reload still reports success" "ok" "$got"
+printf '#!/bin/sh\nexit 1\n' > "$FAKEBIN/hs"
+out="$(PATH="$FAKEBIN:$PATH" make -C "$ROOT" --no-print-directory reload 2>&1)"
+case "$out" in *"not available"*) got=warns ;; *) got="$out" ;; esac
+assert_eq "make reload: a failing hs CLI still warns" "warns" "$got"
+
 finish

@@ -75,8 +75,16 @@ doctor tools:
 # be GC'd before it fires (the project's own after() lesson), which silently
 # skipped the reload while this target still echoed success -- field-proven:
 # "deployed" code repeatedly wasn't live until a manual hs.reload().
+# The client gets ~10s: a reload that drops the IPC port while `hs` is mid-reply can leave
+# the client waiting forever (a deploy sat 10 minutes on it), and by then the reload is
+# already scheduled -- so a hung client is stopped, not waited on.
 reload:
-	@hs -c "_G.__ccReloadTimer = hs.timer.doAfter(0.4, function() hs.reload() end)" >/dev/null 2>&1 && echo "✅ Hammerspoon reloading (config re-read)" || echo "⚠️  'hs' CLI not available — reload from the Hammerspoon menu"
+	@hs -c "_G.__ccReloadTimer = hs.timer.doAfter(0.4, function() hs.reload() end)" >/dev/null 2>&1 & hp=$$!; \
+	n=0; while kill -0 $$hp 2>/dev/null && [ $$n -lt 20 ]; do sleep 0.5; n=$$((n+1)); done; \
+	if kill -0 $$hp 2>/dev/null; then kill $$hp 2>/dev/null; \
+		echo "✅ Hammerspoon reloading (config re-read; the hs CLI hung after sending and was stopped)"; \
+	elif wait $$hp; then echo "✅ Hammerspoon reloading (config re-read)"; \
+	else echo "⚠️  'hs' CLI not available — reload from the Hammerspoon menu"; fi
 
 # Lint, test, deploy, then reload — one shot.
 .PHONY: deploy
