@@ -50,9 +50,13 @@ os.getenv = function(k) if ENV[k] then return ENV[k] end return realGetenv(k) en
 local function mkstub()
   return setmetatable({}, { __index = function() return mkstub() end, __call = function() return mkstub() end })
 end
-local taps, alerts, panelCb = 0, {}, nil
+local taps, overlays, toasts, panelCb = 0, {}, {}, nil
 local function webviewHandle()
-  return setmetatable({ evaluateJavaScript = function() end },
+  -- 2026-09-11: Shepherd's messages are toasts in its own panel (ccToast), never hs.alert's overlay
+  return setmetatable({ evaluateJavaScript = function(_, js)
+      local m = tostring(js or ""):match("^ccToast%((.*)%)$")
+      if m then toasts[#toasts + 1] = m end
+    end },
     { __index = function() return function() return webviewHandle() end end })
 end
 local settingsStore, frame = {}, { x = 0, y = 0, w = 1920, h = 1080 }
@@ -76,7 +80,7 @@ local hs = {
   pathwatcher = { new = function() return mkstub() end },
   menubar = { new = function() return mkstub() end },
   autoLaunch = function() return false end,
-  alert = { show = function(s) alerts[#alerts + 1] = tostring(s) end },
+  alert = { show = function(s) overlays[#overlays + 1] = tostring(s) end },
 }
 hs.timer = setmetatable({
   secondsSinceEpoch = function() return os.time() end,
@@ -121,7 +125,7 @@ check("the panel's message channel is wired", type(panelCb) == "function")
 local function tick() return quiet(function() fx._refreshBody() end) end
 local function item() for _, it in ipairs(fx._shownItems or {}) do if it.key == "s1" then return it end end end
 local function click(a, v, text) return quiet(function() panelCb({ body = json.encode({ a = a, v = v or "", text = text or "" }) }) end) end
-local function asksAlerts() local n = 0 for _, a in ipairs(alerts) do if a:find("asks:", 1, true) then n = n + 1 end end return n end
+local function asksAlerts() local n = 0 for _, a in ipairs(toasts) do if a:find("asks:", 1, true) then n = n + 1 end end return n end
 local ANS = ASK .. "/s1.answer"
 
 tick(); tick()
@@ -131,7 +135,8 @@ if not it then finish() end
 check("a held question marks the card", it.askHeld == true)
 check("...with the question on its meta line", tostring(it.askLine):find("Leave the worktree", 1, true) ~= nil)
 check("...and one-click answers (a single-choice question)", it.askView and it.askView.simple == true and it.askView.options[1] == "Yes, leave then ask")
-check("it alerts once  (" .. asksAlerts() .. ")", asksAlerts() == 1)
+check("it alerts once, as a toast in Shepherd's panel  (" .. asksAlerts() .. ")", asksAlerts() == 1)
+check("...never as the big on-screen overlay that covers every window  (" .. #overlays .. ")", #overlays == 0)
 tick()
 check("...and not again on the next tick", asksAlerts() == 1)
 local row
@@ -184,4 +189,10 @@ click("answer", "s1", "0")
 check("...after which Shepherd doesn't answer it", not exists(ANS))
 
 check("no keystroke anywhere", taps == 0)
+check("no on-screen overlay anywhere in the flow  (" .. table.concat(overlays, " | ") .. ")", #overlays == 0)
+-- alerts.onScreen = true brings the overlay back (read live from cc-config.json)
+os.execute('mkdir -p "' .. T .. '/.claude"')
+write(T .. "/.claude/cc-config.json", '{"alerts":{"onScreen":true}}')
+quiet(function() fx.alert("overlay test") end)
+check("alerts.onScreen true: the overlay is back", overlays[#overlays] == "overlay test")
 finish()

@@ -148,6 +148,8 @@ if not loaded then finish() end
 syncTimers = true
 local dash = rawget(_G, "__ccDashboard")
 local fx = dash.fx
+-- 2026-09-11: messages are FX.alert toasts in the panel, not hs.alert overlays -- capture them there
+do local real = fx.alert; fx.alert = function(m, s) alerts[#alerts + 1] = tostring(m); return real(m, s) end end
 local m1
 for _, it in ipairs(fx._shownItems or {}) do if it.key == "m1" then m1 = it end end
 check("the repo's session is on a repo card", m1 ~= nil and m1.stackKey == "repo:" .. MAIN .. "/.git")

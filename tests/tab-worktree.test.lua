@@ -149,6 +149,8 @@ print = realPrint
 check("the dashboard loads and runs its first refresh", ok)
 if not ok then print("       " .. tostring(err)); finish() end
 local dash = rawget(_G, "__ccDashboard")
+-- 2026-09-11: messages are FX.alert toasts in the panel, not hs.alert overlays -- capture them there
+do local real = dash.fx.alert; dash.fx.alert = function(m, s) alerts[#alerts + 1] = tostring(m); return real(m, s) end end
 
 -- ---- the annotated sessions ------------------------------------------------------
 local byK = {}

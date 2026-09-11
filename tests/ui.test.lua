@@ -3174,5 +3174,21 @@ do
         and doctor:find('"tabBridge.enabled"', 1, true) ~= nil and doctor:find('"bridge.enabled"', 1, true) == nil)
 end
 
+-- ---- On-screen messages stay inside Shepherd's panel (2026-09-11) ------------------------
+-- 2026-09-11: Adam found hs.alert's centre-screen overlays covering every window. Every message
+-- goes through FX.alert (a toast in the panel); only FX.alert may reach hs.alert.show.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local n = 0
+  for _ in src:gmatch("hs%.alert%.show%(") do n = n + 1 end
+  check("hs.alert.show is called in exactly one place (FX.alert)  (found " .. n .. ")", n == 1)
+  local body = src:match("\nfunction FX%.alert%(.-\nend\n") or ""
+  check("...and that place is FX.alert, behind alerts.onScreen",
+        body:find("hs.alert.show(", 1, true) ~= nil and body:find("alerts.onScreen", 1, true) ~= nil)
+  check("the panel has the toast that FX.alert fills", src:find("function ccToast(", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

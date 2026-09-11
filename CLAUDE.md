@@ -85,6 +85,9 @@ and the README's "Testing & development" section.
   up. Approve/Deny skip it. The hook's group has its own matcher (AskUserQuestion) and a
   3630s timeout; never merge it into the matcher-"" group. Its answer file is in BOTH
   `cc_remove` and `FX.removeStatus`.
+- Messages go through `FX.alert` (a toast in the panel); never call `hs.alert.show` directly —
+  Adam found its centre-screen overlay covering every window (`tests/ui.test.lua` pins one caller).
+  Stubbed-panel tests read messages from `ccToast(...)` calls or by wrapping `fx.alert`.
 - Scripts reach `~/.claude` by RENAME (`make install`, `install.sh`): bash reads a running
   script lazily, so rewriting one in place garbles a hook that's mid-run.
 - `vscode://anthropic.claude-code/open?prompt=` opens a new Claude tab in the ACTIVE editor

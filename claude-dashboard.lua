@@ -254,6 +254,7 @@ local gitChangeFiles = {} -- tile key -> { [path] = orig|false }: the authoritat
                           -- path in this set (keeps the --no-index fallback from reaching an
                           -- arbitrary file), and uses the orig for a rename-aware diff (L5 #2).
 local loadConfig         -- forward declaration (defined near refresh)
+local FX = {}            -- the real effects layer (below); declared here so focusProject can FX.alert
 local ledgerSnapshot     -- forward declaration (defined near refresh; bridge handlers use it)
 local refresh            -- forward declaration (so the controller can repaint now)
 -- R3-24: re-entrancy state for refresh() (a kitty feed's waitUntilExit pumps the run
@@ -302,7 +303,7 @@ local function focusProject(name, cwd, editor, activateOnMiss, opts)
   local app = findEditorApp(editor)
   if not app then
     print("[cc-dashboard] editor app not found")
-    hs.alert.show("No editor window found")
+    FX.alert("No editor window found")
     return false
   end
   local windows = app:allWindows()
@@ -329,8 +330,20 @@ local function focusProject(name, cwd, editor, activateOnMiss, opts)
 end
 
 -- ---- the real effects layer (cc-core calls these; tests swap a recorder) ----
-local FX = {}
+-- (FX itself is declared near the top, with the other forward declarations.)
 function FX.now() return os.time() end
+
+-- Shepherd's messages (2026-09-11). hs.alert's centre-screen overlay covered every window, so
+-- every message goes to a small toast inside Shepherd's own panel (ccToast) and the console;
+-- alerts.onScreen = true in cc-config.json brings the overlay back. The ONE hs.alert.show call.
+function FX.alert(msg, secs)
+  msg = tostring(msg or "")
+  print("[cc-dashboard] 💬 " .. msg)
+  local onScreen = false
+  pcall(function() onScreen = loadConfig and core.config(loadConfig(), "alerts.onScreen", false) == true end)
+  if onScreen then pcall(function() hs.alert.show(msg, secs) end); return end
+  if wv then pcall(function() wv:evaluateJavaScript("ccToast(" .. core.json.encode(msg) .. ")") end) end
+end
 function FX.log(m) print(m) end
 
 -- The one window-effect target builder (2026-09-10): every keystroke path takes its target
@@ -366,7 +379,7 @@ function FX.refuseShared(target, what)
   if not FX._refusedAt[k] or now - FX._refusedAt[k] >= 60 then
     FX._refusedAt[k] = now
     pcall(function()
-      hs.alert.show("Shepherd won't type into " .. name .. ": its window has " .. n
+      FX.alert("Shepherd won't type into " .. name .. ": its window has " .. n
         .. " Claude tabs and it can't pick one. Jump there and act in the tab.")
     end)
   end
@@ -2349,11 +2362,11 @@ function FX.exportSession(item, basename, meta)
   local ok = hs.fs.attributes(dir .. "/meta.json") ~= nil
   local copied = hs.fs.attributes(dir .. "/transcript.jsonl") ~= nil
   if ok then
-    pcall(function() hs.alert.show("Claude Shepherd: exported session → " .. dir
+    pcall(function() FX.alert("Claude Shepherd: exported session → " .. dir
       .. (copied and "" or "  (no transcript found)")) end)
     pcall(function() hs.execute("open " .. "'" .. dir:gsub("'", "'\\''") .. "'") end)
   else
-    pcall(function() hs.alert.show("Claude Shepherd: export FAILED — couldn't write to " .. EXPORT_DIR) end)
+    pcall(function() FX.alert("Claude Shepherd: export FAILED — couldn't write to " .. EXPORT_DIR) end)
   end
   return { ok = ok, dir = dir, name = name, transcript = copied }
 end
@@ -2430,7 +2443,7 @@ local function improveCredsRead()
 end
 function FX.runImprove(item)
   local cwd = item and item.cwd
-  if not cwd or cwd == "" then hs.alert.show("Improve: no working dir for this session"); return end
+  if not cwd or cwd == "" then FX.alert("Improve: no working dir for this session"); return end
   local function dq(s) return '"' .. tostring(s):gsub('[\\"`$]', "\\%0") .. '"' end
   local creds = improveCredsRead()
   local lbUrl = creds and creds.url or ""
@@ -2439,12 +2452,12 @@ function FX.runImprove(item)
   local remote = hs.execute("git -C " .. dq(cwd) .. " remote get-url origin 2>/dev/null", false) or ""
   local repo = core.repoFromRemote(remote)
   if lbUrl == "" or token == "" then
-    hs.alert.show("Improve: leaderboard not configured — source ~/.zshrc and reload Hammerspoon")
+    FX.alert("Improve: leaderboard not configured — source ~/.zshrc and reload Hammerspoon")
     print("[cc-improve] missing LB_URL/token (Hammerspoon can't see shell env)")
     return
   end
   if repo == "" then
-    hs.alert.show("Improve: no git origin remote for " .. tostring(item.name))
+    FX.alert("Improve: no git origin remote for " .. tostring(item.name))
     print("[cc-improve] no origin remote under " .. tostring(cwd))
     return
   end
@@ -2453,13 +2466,13 @@ function FX.runImprove(item)
     { ["x-grade-token"] = token, ["content-type"] = "application/json" },
     function(status, body)
       if status ~= 200 or not body then
-        hs.alert.show("Improve: leaderboard error (HTTP " .. tostring(status) .. ")")
+        FX.alert("Improve: leaderboard error (HTTP " .. tostring(status) .. ")")
         print("[cc-improve] HTTP " .. tostring(status) .. " body=" .. tostring(body))
         return
       end
       local ok, data = pcall(function() return hs.json.decode(body) end)
       if not ok or type(data) ~= "table" then
-        hs.alert.show("Improve: bad response from leaderboard")
+        FX.alert("Improve: bad response from leaderboard")
         print("[cc-improve] bad JSON: " .. tostring(body))
         return
       end
@@ -2467,7 +2480,7 @@ function FX.runImprove(item)
       local claimed = tonumber(data.claimed) or #cards
       print("[cc-improve] repo=" .. repo .. " claimed=" .. tostring(claimed))
       if claimed <= 0 or #cards == 0 then
-        hs.alert.show("No improvements found for " .. repo)
+        FX.alert("No improvements found for " .. repo)
         return
       end
       -- FX.targetFor (winTarget is a local defined later in the file, so not in scope
@@ -2479,9 +2492,9 @@ function FX.runImprove(item)
       -- Serialized: the paste is a multi-second keystroke ladder (R3 #2/#5).
       dispatchSerialized(item, "improve", function()
         if FX.pasteIntoWindow(target, { text = core.improvePrompt(cards) }) then
-          hs.alert.show("Improve: pulled " .. #cards .. " insight(s) → review prompt sent to " .. tostring(item.name))
+          FX.alert("Improve: pulled " .. #cards .. " insight(s) → review prompt sent to " .. tostring(item.name))
         else
-          hs.alert.show("Improve: no window match for " .. tostring(item.name) .. " — prompt NOT sent (cards claimed)")
+          FX.alert("Improve: no window match for " .. tostring(item.name) .. " — prompt NOT sent (cards claimed)")
         end
       end)
     end)
@@ -2612,7 +2625,7 @@ function FX.closeTab(it, opts)
   local function refuse(why)
     if not (opts and opts.quiet) then
       FX._closeTabWhy[tostring(it.key)] = why
-      pcall(function() hs.alert.show("Can't close " .. name .. "'s tab: " .. why) end)
+      pcall(function() FX.alert("Can't close " .. name .. "'s tab: " .. why) end)
     end
     print("[cc-dashboard] ⚠️ Close NOT sent for '" .. name .. "': " .. why)
     return false, why
@@ -2663,7 +2676,7 @@ function FX.tabBridgePollResults()
       else
         local why = (ok and type(res) == "table" and res.reason) or "no reason given"
         print("[cc-dashboard] ❌ the Shepherd tab bridge didn't close '" .. p.name .. "': " .. tostring(why))
-        pcall(function() hs.alert.show("Couldn't close " .. p.name .. "'s tab: " .. tostring(why)) end)
+        pcall(function() FX.alert("Couldn't close " .. p.name .. "'s tab: " .. tostring(why)) end)
       end
     elseif FX.now() - (p.at or 0) >= FX.TAB_BRIDGE_ANSWER_WAIT then
       os.remove(FX.TAB_BRIDGE_DIR .. "/" .. p.hw .. ".in/" .. id .. ".json")
@@ -2672,7 +2685,7 @@ function FX.tabBridgePollResults()
         print("[cc-dashboard] ⚠️ the tab bridge didn't answer a select for '" .. p.name .. "'")
       else
         print("[cc-dashboard] ⚠️ the Shepherd tab bridge (host " .. p.hw .. ") didn't answer -- close of '" .. p.name .. "' withdrawn")
-        pcall(function() hs.alert.show("The Shepherd tab bridge didn't answer, so " .. p.name .. "'s tab is still open.") end)
+        pcall(function() FX.alert("The Shepherd tab bridge didn't answer, so " .. p.name .. "'s tab is still open.") end)
       end
     end
   end
@@ -3076,12 +3089,12 @@ function FX.endSession(key)
   if not ok then
     print("[cc-dashboard] ⚠️ End session refused for '" .. name .. "': " .. tostring(why))
     if gone then FX.removeStatus(key); return true end
-    pcall(function() hs.alert.show("Won't end " .. name .. ": " .. tostring(why)) end)
+    pcall(function() FX.alert("Won't end " .. name .. ": " .. tostring(why)) end)
     return false
   end
   pcall(function() hs.execute("kill -TERM " .. tostring(it.session_pid)) end)
   print("[cc-dashboard] ✅ ended the tab-less session '" .. name .. "' (pid " .. tostring(it.session_pid) .. ")")
-  pcall(function() hs.alert.show("Ended " .. name .. "'s leftover session -- its chat is saved") end)
+  pcall(function() FX.alert("Ended " .. name .. "'s leftover session -- its chat is saved") end)
   FX.removeStatus(key)
   return true
 end
@@ -3213,7 +3226,7 @@ end
 
 function FX.mergeAlert(msg)
   print("[cc-dashboard] " .. msg)
-  pcall(function() hs.alert.show(msg, 4) end)
+  pcall(function() FX.alert(msg, 4) end)
 end
 
 -- Its turn came: re-check with fresh git facts, then tell the waiting script to go.
@@ -3963,7 +3976,7 @@ local function spawnEditorWindow(spec)
   if willCreate then wantFrame, frameWhy = FX.spawnTargetFrame(spec.editor, loadConfig()) end
   local t = hs.task.new("/usr/bin/open", nil, core.vscodeOpenArgs(spec))
   if t then t:start() end
-  hs.alert.show("Claude Shepherd: opening " .. spec.app .. " — starting claude (best-effort)")
+  FX.alert("Claude Shepherd: opening " .. spec.app .. " — starting claude (best-effort)")
   -- Cold-start timing: a NEW window (the new-project case) takes seconds to be
   -- input-ready. Beats run via core.runSequence (see its header for the
   -- column/pcall semantics); handles are captured into spawnSeqHandles so the
@@ -4312,7 +4325,7 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
   if ORCH_DRY_RUN and not live then
     print("[cc-orch] DRY-RUN (" .. spec.kind .. ") would spawn in "
       .. tostring(project) .. ": " .. describeSpec(spec))
-    hs.alert.show("Claude Shepherd (dry-run): would spawn " .. spec.kind .. " in " .. tostring(project))
+    FX.alert("Claude Shepherd (dry-run): would spawn " .. spec.kind .. " in " .. tostring(project))
     return false  -- R1-22: a dry-run launched NOTHING; callers must not act as if it did
   end
   if spec.kind == "kitty" then
@@ -4320,7 +4333,7 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
     -- and log instead of crashing on table.concat / indexing a nil argv.
     if not spec.argv then
       print("[cc-orch] kitty spawn aborted: " .. tostring(spec.error))
-      pcall(function() hs.alert.show("Claude Shepherd: kitty spawn aborted (" .. tostring(spec.error) .. ")") end)
+      pcall(function() FX.alert("Claude Shepherd: kitty spawn aborted (" .. tostring(spec.error) .. ")") end)
       return false
     end
     print("[cc-orch] kitty spawn: " .. table.concat(spec.argv, " "))
@@ -4328,13 +4341,13 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
     for i = 2, #spec.argv do args[#args + 1] = spec.argv[i] end
     local t = hs.task.new(spec.argv[1], nil, args)
     if t then t:start() else print("[cc-orch] kitty task failed to build") end
-    hs.alert.show("Claude Shepherd: spawning kitty in " .. tostring(project))
+    FX.alert("Claude Shepherd: spawning kitty in " .. tostring(project))
   elseif spec.kind == "vscode" then
     spawnEditorWindow(spec)
   else
     print("[cc-orch] terminal spawn in " .. tostring(project))
     hs.osascript.applescript(spec.applescript)  -- Terminal login shell -> claude on PATH
-    hs.alert.show("Claude Shepherd: spawning a session in " .. tostring(project))
+    FX.alert("Claude Shepherd: spawning a session in " .. tostring(project))
   end
   return true  -- R1-22: a real launch happened
 end
@@ -4576,7 +4589,7 @@ function FX.openWorktree(stackKey, path)
     pending = FX._openingWt })
   if not ok then
     print("[cc-dashboard] open-worktree refused (" .. tostring(why) .. "): " .. target)
-    hs.alert.show("Can't open that worktree: " .. tostring(why))
+    FX.alert("Can't open that worktree: " .. tostring(why))
     return
   end
   local cfg = loadConfig()
@@ -4637,14 +4650,14 @@ function FX.openClaudeTab(opts)
     local title = w and w:title() or ""
     if not (w and core.pickWindow({ title }, name, root, os.getenv("USER"), { editor = editor, ancestors = false })) then
       print("[cc-dashboard] new tab: " .. name .. "'s window wasn't in front -- nothing opened")
-      hs.alert.show("New Claude tab not opened: " .. label .. "'s window wasn't in front")
+      FX.alert("New Claude tab not opened: " .. label .. "'s window wasn't in front")
       return
     end
     local app = w:application()
     local uri = core.claudeTabUri(app and app:bundleID() or nil, opts.prompt, editor)
     print("[cc-dashboard] new tab in " .. name)
     hs.urlevent.openURL(uri)
-    hs.alert.show("New Claude tab in " .. label .. " — check the prompt and press Return")
+    FX.alert("New Claude tab in " .. label .. " — check the prompt and press Return")
   end
   dispatchSerialized({ editor = editor }, "new-tab", function()
     if focusProject(name, root, editor, false, match) then
@@ -4666,7 +4679,7 @@ function FX.openClaudeTab(opts)
         after(1.0, poll)
       else
         print("[cc-dashboard] new tab: " .. name .. "'s window never appeared -- nothing opened")
-        hs.alert.show("New Claude tab not opened: " .. label .. "'s window never appeared")
+        FX.alert("New Claude tab not opened: " .. label .. "'s window never appeared")
       end
     end
     after(2.0, poll)
@@ -4687,12 +4700,12 @@ function FX.newWorktreeTab(stackKey, specJson)
   end
   if not any then
     print("[cc-dashboard] new-worktree-tab: no repo behind stack " .. tostring(stackKey))
-    hs.alert.show("New worktree tab: this card isn't a git repo's")
+    FX.alert("New worktree tab: this card isn't a git repo's")
     return
   end
   local editor = FX.tabEditorFor(stackKey)
   if not editor then
-    hs.alert.show("New worktree tab needs VS Code or Cursor (the Claude extension opens the tab)")
+    FX.alert("New worktree tab needs VS Code or Cursor (the Claude extension opens the tab)")
     return
   end
   local branches
@@ -4706,7 +4719,7 @@ function FX.newWorktreeTab(stackKey, specJson)
     exists = function(p) return hs.fs.attributes(p, "mode") ~= nil end })
   if not req then
     print("[cc-dashboard] new-worktree-tab refused (" .. tostring(why) .. ")")
-    hs.alert.show("New worktree tab: " .. tostring(why))
+    FX.alert("New worktree tab: " .. tostring(why))
     return
   end
   print("[cc-dashboard] new-worktree-tab: " .. req.branch .. " in " .. tostring(any.mainRoot))
@@ -4751,12 +4764,12 @@ function FX.abLaunch(spec)
   end
   local plan = core.abCohortPlan(spec)
   if not plan.ok then
-    pcall(function() hs.alert.show("Claude Shepherd: A/B — " .. tostring(plan.error)) end)
+    pcall(function() FX.alert("Claude Shepherd: A/B — " .. tostring(plan.error)) end)
     return { ok = false, error = plan.error }
   end
   -- Require a real git repo (worktree add would fail anyway -- fail early + clearly).
   if not FX.gitRoot(plan.repoRoot) then
-    pcall(function() hs.alert.show("Claude Shepherd: A/B needs a git repo (no repo at that folder)") end)
+    pcall(function() FX.alert("Claude Shepherd: A/B needs a git repo (no repo at that folder)") end)
     return { ok = false, error = "not a git repo" }
   end
   local created = {}
@@ -4768,7 +4781,7 @@ function FX.abLaunch(spec)
         hs.execute(core.gitWorktreeRemoveCmd(plan.repoRoot, c.path) .. " 2>&1", true)
         hs.execute(core.gitBranchDeleteCmd(plan.repoRoot, c.branch) .. " 2>&1", true)
       end
-      pcall(function() hs.alert.show("Claude Shepherd: A/B worktree failed — " .. tostring(out):sub(1, 140)) end)
+      pcall(function() FX.alert("Claude Shepherd: A/B worktree failed — " .. tostring(out):sub(1, 140)) end)
       return { ok = false, error = out }
     end
     created[#created + 1] = { path = v.worktreePath, branch = v.branch }
@@ -4788,7 +4801,7 @@ function FX.abLaunch(spec)
   FX.writeAbCohorts(reg)
   ledgerFor({ name = "A/B " .. plan.cohort, cwd = plan.repoRoot },
     { type = "ab_launch", cohort = plan.cohort, count = #plan.variants })
-  pcall(function() hs.alert.show("Claude Shepherd: launched A/B — " .. #plan.variants .. " variants in worktrees") end)
+  pcall(function() FX.alert("Claude Shepherd: launched A/B — " .. #plan.variants .. " variants in worktrees") end)
   return { ok = true, cohort = plan.cohort }
 end
 
@@ -4872,15 +4885,15 @@ function FX.abJudge(cohort)
     if not firstTile and tile and not tile.remote then firstTile = tile end
   end
   if not firstTile then
-    pcall(function() hs.alert.show("Claude Shepherd: A/B judge needs at least one live local variant") end)
+    pcall(function() FX.alert("Claude Shepherd: A/B judge needs at least one live local variant") end)
     return false
   end
   local prompt = core.abJudgePrompt(c.task, entries)
   dispatchSerialized(firstTile, "ab-judge", function()
     if FX.pasteIntoWindow(winTarget(firstTile), { text = prompt }) then
-      pcall(function() hs.alert.show("Claude Shepherd: sent the A/B judge prompt to " .. tostring(firstTile.name)) end)
+      pcall(function() FX.alert("Claude Shepherd: sent the A/B judge prompt to " .. tostring(firstTile.name)) end)
     else
-      pcall(function() hs.alert.show("Claude Shepherd: couldn't deliver the judge prompt (no window match)") end)
+      pcall(function() FX.alert("Claude Shepherd: couldn't deliver the judge prompt (no window match)") end)
     end
   end)
   return true
@@ -5372,7 +5385,7 @@ local function handleBridgeMsg(msg)
   end
   if a == "lock-set" then
     local ok = FX.lockSet(tostring(payload.v or ""))
-    pcall(function() hs.alert.show("Claude Shepherd: "
+    pcall(function() FX.alert("Claude Shepherd: "
       .. (ok and "🔒 lock password set — click 🔒 to lock" or "couldn't set lock password")) end)
     return
   end
@@ -5383,7 +5396,7 @@ local function handleBridgeMsg(msg)
     local msg = (res == "ok") and "enabled kitty remote control — restart kitty to apply"
       or (res == "already") and "kitty remote control already enabled"
       or "couldn't update kitty.conf"
-    pcall(function() hs.alert.show("Claude Shepherd: " .. msg) end)
+    pcall(function() FX.alert("Claude Shepherd: " .. msg) end)
     return
   end
   if a == "open-settings" then
@@ -5396,7 +5409,7 @@ local function handleBridgeMsg(msg)
     if raw and #raw > 0 then
       local ok, parsed = pcall(function() return hs.json.decode(raw) end)
       if ok and type(parsed) == "table" then cfg = parsed
-      else pcall(function() hs.alert.show("Claude Shepherd: cc-config.json is malformed — showing defaults") end) end
+      else pcall(function() FX.alert("Claude Shepherd: cc-config.json is malformed — showing defaults") end) end
     end
     local gateOn = (FX.readFile(GATE_FLAG) ~= nil) and "true" or "false"
     local autoOn = "false"
@@ -5446,7 +5459,7 @@ local function handleBridgeMsg(msg)
       end
       print("[cc-dashboard] saved cc-config.json (gate=" .. tostring(parsed.gate)
         .. ", autoLaunch=" .. tostring(parsed.autoLaunch) .. ")")
-      pcall(function() hs.alert.show("Claude Shepherd: settings saved") end)
+      pcall(function() FX.alert("Claude Shepherd: settings saved") end)
     end
     return
   end
@@ -5533,7 +5546,7 @@ local function handleBridgeMsg(msg)
       local okp, p = pcall(hs.json.decode, payload.text or "{}")
       local st, saved = core.presetPush(FX.readPresets(), (okp and type(p) == "table") and p or {})
       if saved then FX.writePresets(st)
-      else pcall(function() hs.alert.show("Claude Shepherd: preset needs a name and an absolute folder") end) end
+      else pcall(function() FX.alert("Claude Shepherd: preset needs a name and an absolute folder") end) end
     else
       FX.writePresets(core.presetRemove(FX.readPresets(), tostring(payload.v or "")))
     end
@@ -5548,7 +5561,7 @@ local function handleBridgeMsg(msg)
       local okp, p = pcall(hs.json.decode, payload.text or "{}")
       local st, saved, errs = core.agentPush(FX.readAgents(), (okp and type(p) == "table") and p or {})
       if saved then FX.writeAgents(st)
-      else pcall(function() hs.alert.show("Claude Shepherd: agent invalid — "
+      else pcall(function() FX.alert("Claude Shepherd: agent invalid — "
         .. table.concat(errs or { "?" }, "; ")) end) end
     elseif a == "agent-fork" then
       local st, ok = core.agentFork(FX.readAgents(), tostring(payload.v or ""))
@@ -5567,7 +5580,7 @@ local function handleBridgeMsg(msg)
       local okp, p = pcall(hs.json.decode, payload.text or "{}")
       local st, saved, errs = core.mcpPush(FX.readMcp(), (okp and type(p) == "table") and p or {})
       if saved then FX.writeMcp(st)
-      else pcall(function() hs.alert.show("Claude Shepherd: MCP server invalid — "
+      else pcall(function() FX.alert("Claude Shepherd: MCP server invalid — "
         .. table.concat(errs or { "?" }, "; ")) end) end
     else
       FX.writeMcp(core.mcpRemove(FX.readMcp(), tostring(payload.v or "")))
@@ -5605,7 +5618,7 @@ local function handleBridgeMsg(msg)
       end
       local st, saved, errs = core.agentPush(st0, p)
       if saved then FX.writeAgents(st)
-      else pcall(function() hs.alert.show("Claude Shepherd: agent invalid — "
+      else pcall(function() FX.alert("Claude Shepherd: agent invalid — "
         .. table.concat(errs or { "?" }, "; ")) end) end
     elseif a == "agent-ed-delete" then
       FX.writeAgents(core.agentRemove(FX.readAgents(), tostring(payload.v or "")))
@@ -5620,7 +5633,7 @@ local function handleBridgeMsg(msg)
       local okp, p = pcall(hs.json.decode, payload.text or "{}")
       local st, saved, errs = core.mcpPush(FX.readMcp(), (okp and type(p) == "table") and p or {})
       if saved then FX.writeMcp(st)
-      else pcall(function() hs.alert.show("Claude Shepherd: MCP server invalid — "
+      else pcall(function() FX.alert("Claude Shepherd: MCP server invalid — "
         .. table.concat(errs or { "?" }, "; ")) end) end
     elseif a == "mcp-ed-delete" then
       FX.writeMcp(core.mcpRemove(FX.readMcp(), tostring(payload.v or "")))
@@ -5655,12 +5668,12 @@ local function handleBridgeMsg(msg)
     -- file, losing whatever else is in it). A read (open) still replies with the
     -- defaults view so the overlay opens, but every mutation bails here.
     if malformed then
-      pcall(function() hs.alert.show("Claude Shepherd: cc-config.json is malformed — fix it before editing policies") end)
+      pcall(function() FX.alert("Claude Shepherd: cc-config.json is malformed — fix it before editing policies") end)
       if a ~= "open-policy-editor" then return end
     end
     local policies = type(cfg.policies) == "table" and cfg.policies or {}
     local changed = false
-    local function badAlert(errs) pcall(function() hs.alert.show("Claude Shepherd: invalid — "
+    local function badAlert(errs) pcall(function() FX.alert("Claude Shepherd: invalid — "
       .. table.concat(errs or { "?" }, "; ")) end) end
     if a == "policy-bundle-save" then
       local okp, p = pcall(hs.json.decode, payload.text or "{}")
@@ -5714,7 +5727,7 @@ local function handleBridgeMsg(msg)
       if oldName ~= "" and oldName ~= tostring(p.name or "") then st0 = core.ruleRemove(st0, oldName) end
       local st, saved, errs = core.rulePush(st0, p)
       if saved then FX.writeRules(st)
-      else pcall(function() hs.alert.show("Claude Shepherd: rule invalid — "
+      else pcall(function() FX.alert("Claude Shepherd: rule invalid — "
         .. table.concat(errs or { "?" }, "; ")) end) end
     elseif a == "rule-ed-delete" then
       FX.writeRules(core.ruleRemove(FX.readRules(), tostring(payload.v or "")))
@@ -5761,12 +5774,12 @@ local function handleBridgeMsg(msg)
         -- and re-deriving the reason here could mislabel future checks.
         why = why or "invalid project name or parent folder"
         print("[cc-orch] new-project rejected: " .. why)
-        pcall(function() hs.alert.show("Claude Shepherd: " .. why) end)
+        pcall(function() FX.alert("Claude Shepherd: " .. why) end)
         return
       end
       if not FX.mkdirP(dir) then
         print("[cc-orch] new-project mkdir failed: " .. dir)
-        pcall(function() hs.alert.show("Claude Shepherd: couldn't create " .. dir) end)
+        pcall(function() FX.alert("Claude Shepherd: couldn't create " .. dir) end)
         return
       end
       print("[cc-orch] new project folder ready: " .. dir)
@@ -5832,7 +5845,7 @@ local function handleBridgeMsg(msg)
     local key = tostring(payload.v or "")
     local item = byKey[key]
     if item and item.remote then
-      pcall(function() hs.alert.show("Claude Shepherd: can't feed a remote session (no local window)") end)
+      pcall(function() FX.alert("Claude Shepherd: can't feed a remote session (no local window)") end)
       return
     end
     if item then
@@ -5950,7 +5963,7 @@ local function handleBridgeMsg(msg)
       if rendered then
         pcall(function() wv:evaluateJavaScript("ccTemplateRendered(" .. hs.json.encode({ text = rendered }) .. ")") end)
       else
-        pcall(function() hs.alert.show("Claude Shepherd: fill required variables: " .. table.concat(missing or {}, ", ")) end)
+        pcall(function() FX.alert("Claude Shepherd: fill required variables: " .. table.concat(missing or {}, ", ")) end)
       end
     end
     return
@@ -5964,7 +5977,7 @@ local function handleBridgeMsg(msg)
     local files = FX.listPromptFiles(dir)
     local st, summary = core.promptImport(FX.readTemplates(), files, { now = os.time() })
     if summary.imported > 0 then FX.writeTemplates(st) end
-    pcall(function() hs.alert.show("Claude Shepherd: imported " .. summary.imported ..
+    pcall(function() FX.alert("Claude Shepherd: imported " .. summary.imported ..
       " template(s) from " .. dir .. (summary.skipped > 0 and (" (" .. summary.skipped .. " skipped)") or "")) end)
     local out = enrichedTemplates()
     local listJson = (#out > 0) and hs.json.encode(out) or "[]"
@@ -5979,7 +5992,7 @@ local function handleBridgeMsg(msg)
       local tx = tostring(payload.text or ""):gsub("^%s+", ""):gsub("%s+$", "")
       local st, saved = core.templatePushVersioned(FX.readTemplates(), { name = nm, text = tx }, { now = os.time() })
       if saved then FX.writeTemplates(st)
-      else pcall(function() hs.alert.show("Claude Shepherd: template needs a name and text") end) end
+      else pcall(function() FX.alert("Claude Shepherd: template needs a name and text") end) end
     elseif a == "template-delete" then
       FX.writeTemplates(core.templateRemove(FX.readTemplates(), tostring(payload.v or "")))
     end
@@ -6014,7 +6027,7 @@ local function handleBridgeMsg(msg)
       if prior and prior.vars then rec.vars = prior.vars end
       local st, saved, errs = core.templatePushVersioned(stt, rec, { now = os.time() })
       if saved then FX.writeTemplates(st)
-      else pcall(function() hs.alert.show("Claude Shepherd: template invalid — "
+      else pcall(function() FX.alert("Claude Shepherd: template invalid — "
         .. table.concat(errs or { "?" }, "; ")) end) end
     elseif a == "template-editor-delete" then
       FX.writeTemplates(core.templateRemove(FX.readTemplates(), tostring(payload.v or "")))
@@ -6045,7 +6058,7 @@ local function handleBridgeMsg(msg)
       local okp, p = pcall(hs.json.decode, payload.text or "{}")
       local st, saved, errs = core.schedulePush(FX.readSchedules(), (okp and type(p) == "table") and p or {})
       if saved then FX.writeSchedules(st)
-      else pcall(function() hs.alert.show("Claude Shepherd: routine invalid — "
+      else pcall(function() FX.alert("Claude Shepherd: routine invalid — "
         .. table.concat(errs or { "?" }, "; ")) end) end
     elseif a == "schedule-delete" then
       FX.writeSchedules(core.scheduleRemove(FX.readSchedules(), tostring(payload.v or "")))
@@ -6068,7 +6081,7 @@ local function handleBridgeMsg(msg)
   -- respect spawn.live's dry-run (FX.spawnSession), so this is safe by default.
   if a == "schedule-run-now" then
     local r = core.scheduleGet(FX.readSchedules(), tostring(payload.v or ""))
-    if not r then pcall(function() hs.alert.show("Claude Shepherd: routine not found") end); return end
+    if not r then pcall(function() FX.alert("Claude Shepherd: routine not found") end); return end
     local cfg = loadConfig()
     if r.action == "digest" then
       local hours = tonumber(r.digestHours) or 24
@@ -6078,9 +6091,9 @@ local function handleBridgeMsg(msg)
       if topic and topic ~= "" then
         FX.push(topic, "Claude Shepherd: shift report (" .. hours .. "h)",
           core.standupMarkdown(report, { windowLabel = hours .. "h" }):sub(1, 800))
-        pcall(function() hs.alert.show("Claude Shepherd: pushed '" .. tostring(r.name) .. "' digest") end)
+        pcall(function() FX.alert("Claude Shepherd: pushed '" .. tostring(r.name) .. "' digest") end)
       else
-        pcall(function() hs.alert.show("Claude Shepherd: no push topic (set escalation.pushTopic)") end)
+        pcall(function() FX.alert("Claude Shepherd: no push topic (set escalation.pushTopic)") end)
       end
     else
       FX.spawnSession(r.editor or core.config(cfg, "spawn.editor", "terminal"),
@@ -6098,7 +6111,7 @@ local function handleBridgeMsg(msg)
     -- into a LOCAL window matching the remote name. Refuse remote here -- the Lua side is the
     -- authoritative chokepoint, not the (separately) disabled JS button.
     if item and item.remote then
-      pcall(function() hs.alert.show("Claude Shepherd: '" .. a .. "' isn't available for remote session "
+      pcall(function() FX.alert("Claude Shepherd: '" .. a .. "' isn't available for remote session "
         .. tostring(item.label or item.name) .. " (headless approve/deny only)") end)
       return
     end
@@ -6143,7 +6156,7 @@ local function handleBridgeMsg(msg)
         -- log. Refuse the arm when the feature is globally disabled.
         if core.config(cfg, "policies.autopilot.enabled", false) ~= true then
           print("[cc-autopilot] arm refused for " .. key .. " (disabled in Settings)")
-          pcall(function() hs.alert.show("Claude Shepherd: Autopilot is disabled in Settings") end)
+          pcall(function() FX.alert("Claude Shepherd: Autopilot is disabled in Settings") end)
           return
         end
         local mins = tonumber(core.config(cfg, "policies.autopilot.minutes", 15)) or 15
@@ -6189,7 +6202,7 @@ local function handleBridgeMsg(msg)
     -- autoModelPreface no-ops, making the opt-in a silent dead control otherwise.
     if on and (it.remote or not core.isAnthropicSession(it.model, it.base_url)
                or it.editor == "kitty" or it.editor == "terminal") then
-      pcall(function() hs.alert.show("Claude Shepherd: model auto-routing needs a local native-Anthropic chat-input session (VS Code/Cursor)") end)
+      pcall(function() FX.alert("Claude Shepherd: model auto-routing needs a local native-Anthropic chat-input session (VS Code/Cursor)") end)
       refresh(); return
     end
     FX.setAutoModel(key, on)
@@ -6492,7 +6505,7 @@ local function handleBridgeMsg(msg)
     local txt = tostring(payload.text or "")
     if txt ~= "" then
       pcall(function() hs.pasteboard.setContents(txt) end)
-      pcall(function() hs.alert.show("Claude Shepherd: copied to clipboard") end)
+      pcall(function() FX.alert("Claude Shepherd: copied to clipboard") end)
     end
     return
   end
@@ -6605,7 +6618,7 @@ local function handleBridgeMsg(msg)
     local it = byKey[tostring(payload.v or "")]
     local sid = it and it.session_id
     if not sid or tostring(sid) == "" then
-      pcall(function() hs.alert.show("Claude Shepherd: no recorded activity for this session yet (ledger off or no session id)") end)
+      pcall(function() FX.alert("Claude Shepherd: no recorded activity for this session yet (ledger off or no session id)") end)
       return
     end
     local res = FX.readLedger({})
@@ -6665,7 +6678,7 @@ local function handleBridgeMsg(msg)
     local target = byKey[tostring(payload.v or "")]
     if not target then return end
     if target.remote then
-      pcall(function() hs.alert.show("Claude Shepherd: rewind is local-only (no keystroke path to a remote session)") end)
+      pcall(function() FX.alert("Claude Shepherd: rewind is local-only (no keystroke path to a remote session)") end)
       return
     end
     pcall(function()
@@ -6681,9 +6694,9 @@ local function handleBridgeMsg(msg)
       dispatchSerialized(target, a, function()
         if FX.typeIntoWindow(winTarget(target), "/rewind") then
           ledgerFor(target, { type = "rewind_open" })
-          hs.alert.show("Claude Shepherd: opened /rewind in " .. tostring(target.name))
+          FX.alert("Claude Shepherd: opened /rewind in " .. tostring(target.name))
         else
-          hs.alert.show("Claude Shepherd: couldn't deliver /rewind (no matching window)")
+          FX.alert("Claude Shepherd: couldn't deliver /rewind (no matching window)")
         end
       end)
     end)
@@ -6849,7 +6862,7 @@ local function handleBridgeMsg(msg)
     local key = tostring(payload.v or "")
     local it = byKey[key]
     if not it then
-      pcall(function() hs.alert.show("Claude Shepherd: no such session to export") end)
+      pcall(function() FX.alert("Claude Shepherd: no such session to export") end)
       return
     end
     local now = os.time()
@@ -6916,7 +6929,7 @@ local function handleBridgeMsg(msg)
     local lines = {}
     for _, e in ipairs(res.events) do lines[#lines + 1] = core.json.encode(e) end
     FX.writeFile(fname, (#lines > 0) and (table.concat(lines, "\n") .. "\n") or "")
-    pcall(function() hs.alert.show("Claude Shepherd: exported " .. #res.events .. " event(s) → " .. fname) end)
+    pcall(function() FX.alert("Claude Shepherd: exported " .. #res.events .. " event(s) → " .. fname) end)
     return
   end
   if a == "audit-purge" then
@@ -6934,7 +6947,7 @@ local function handleBridgeMsg(msg)
            "Permanently delete " .. scope .. "?\nThis cannot be undone.", "Purge", "Cancel") end) == "Purge" then
         local n = FX.purgeLedger(f)
         wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")")
-        hs.alert.show("Claude Shepherd: purged " .. n .. " event(s)")
+        FX.alert("Claude Shepherd: purged " .. n .. " event(s)")
       end
     end)
     return
@@ -6962,7 +6975,7 @@ local function handleBridgeMsg(msg)
         -- overlay would still show the just-deleted events (mirrors the audit-purge handler).
         FX.sendHistory()
         wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")")
-        hs.alert.show("Claude Shepherd: deleted " .. n .. " event(s) from " .. label)
+        FX.alert("Claude Shepherd: deleted " .. n .. " event(s) from " .. label)
       end
     end)
     return
@@ -6982,16 +6995,16 @@ local function handleBridgeMsg(msg)
       -- PAST days only (enforcing redactLedger's contract): today's file is hot
       -- with hook appends, and the rewrite+rename would silently destroy one.
       if not core.ledgerDayIsPast(day, FX.now()) then
-        pcall(function() hs.alert.show("Claude Shepherd: can't redact today's events yet — try after UTC midnight") end)
+        pcall(function() FX.alert("Claude Shepherd: can't redact today's events yet — try after UTC midnight") end)
         return
       end
       local done = FX.redactLedger(day, tostring(r.id), type(r.fields) == "table" and r.fields or {})
       pcall(function()
         if done then
           wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")")
-          hs.alert.show("Claude Shepherd: redacted entry")
+          FX.alert("Claude Shepherd: redacted entry")
         else
-          hs.alert.show("Claude Shepherd: couldn't redact (entry not found)")
+          FX.alert("Claude Shepherd: couldn't redact (entry not found)")
         end
       end)
     end
@@ -7021,7 +7034,7 @@ local function handleBridgeMsg(msg)
     f = (okf and type(f) == "table") and f or {}
     local target = byKey[tostring(payload.v or "")]
     if not target then
-      pcall(function() hs.alert.show("Claude Shepherd: select a session first, then Review activity") end)
+      pcall(function() FX.alert("Claude Shepherd: select a session first, then Review activity") end)
       return
     end
     -- Remote (bridge) tiles: this branch bypasses handleAction's R2-07 chokepoint
@@ -7030,7 +7043,7 @@ local function handleBridgeMsg(msg)
     -- remote session's folder name and paste + submit the review prompt there -- the
     -- exact R2-07/R3-17 shape clear/compact refuse explicitly. Refuse remote here too.
     if target.remote then
-      pcall(function() hs.alert.show("Claude Shepherd: 'Review activity' isn't available for remote session "
+      pcall(function() FX.alert("Claude Shepherd: 'Review activity' isn't available for remote session "
         .. tostring(target.label or target.name) .. " (headless approve/deny only)") end)
       return
     end
@@ -7043,9 +7056,9 @@ local function handleBridgeMsg(msg)
     -- be announced as sent (R3 #0 -- same contract as the Improve caller).
     dispatchSerialized(target, a, function()
       if FX.pasteIntoWindow(winTarget(target), { text = prompt }) then
-        pcall(function() hs.alert.show("Claude Shepherd: sent a " .. #res.events .. "-event review to " .. tostring(target.name)) end)
+        pcall(function() FX.alert("Claude Shepherd: sent a " .. #res.events .. "-event review to " .. tostring(target.name)) end)
       else
-        pcall(function() hs.alert.show("Claude Shepherd: no window match for " .. tostring(target.name) .. " — review NOT sent") end)
+        pcall(function() FX.alert("Claude Shepherd: no window match for " .. tostring(target.name) .. " — review NOT sent") end)
       end
     end)
     return
@@ -7093,7 +7106,7 @@ local function handleBridgeMsg(msg)
     end
     print("[cc-bulk] " .. action .. " -> " .. n .. " session(s)")
     if n > 0 then
-      pcall(function() hs.alert.show("Claude Shepherd: " .. action .. " → " .. n .. " session(s)") end)
+      pcall(function() FX.alert("Claude Shepherd: " .. action .. " → " .. n .. " session(s)") end)
     end
     refresh()
     return
@@ -7111,7 +7124,7 @@ local function handleBridgeMsg(msg)
   if item.remote and a ~= "ctx-menu" and a ~= "relabel" and a ~= "set-group" then
     local ks = core.config(loadConfig(), "bridge.keystrokes", false) == true
     if not core.remoteActionAllowed(item, a, { keystrokes = ks }) then
-      pcall(function() hs.alert.show("Claude Shepherd: '" .. a .. "' isn't available for remote session "
+      pcall(function() FX.alert("Claude Shepherd: '" .. a .. "' isn't available for remote session "
         .. tostring(item.label or item.name) .. " (headless approve/deny only)") end)
       return
     end
@@ -7256,7 +7269,7 @@ local function handleBridgeMsg(msg)
             if item.status == "working" or item.status == "approval" then
               draining[item.key] = true
               ledgerFor(item, { type = "drain_request" })
-              pcall(function() hs.alert.show("Claude Shepherd: will close " .. shown .. " after this turn") end)
+              pcall(function() FX.alert("Claude Shepherd: will close " .. shown .. " after this turn") end)
             else
               dispatchSerialized(item, "close", function() core.handleAction(FX, item, "close") end)
               refresh()
@@ -7273,7 +7286,7 @@ local function handleBridgeMsg(msg)
             { title = "Confirm: respawn " .. shown, fn = function()
                 local rs = core.respawnSpec(item, loadConfig())
                 if not rs.canRespawn then
-                  pcall(function() hs.alert.show("Claude Shepherd: can't respawn — " .. tostring(rs.reason)) end)
+                  pcall(function() FX.alert("Claude Shepherd: can't respawn — " .. tostring(rs.reason)) end)
                   return
                 end
                 -- rs.providerId=nil means a FAITHFUL bare-claude relaunch: pass the
@@ -7354,7 +7367,7 @@ local function handleBridgeMsg(msg)
             ledgerFor(item, { type = "nudge", text = tostring(payload.text or ""):sub(1, 200), image = true })
           else
             ledgerFor(item, { type = "nudge_skipped", text = tostring(payload.text or ""):sub(1, 200), image = true })
-            pcall(function() hs.alert.show("Claude Shepherd: no window match for " .. tostring(item.label or item.name) .. " — nudge NOT sent") end)
+            pcall(function() FX.alert("Claude Shepherd: no window match for " .. tostring(item.label or item.name) .. " — nudge NOT sent") end)
           end
         end)
       else
@@ -7383,7 +7396,7 @@ local function handleBridgeMsg(msg)
     if a == "nudge" and not FX.nudgeSafeNow(item) then
       ledgerFor(item, { type = "nudge_skipped", reason = "approval",
                         text = tostring(text or ""):sub(1, 200) })
-      pcall(function() hs.alert.show("Claude Shepherd: " .. tostring(item.label or item.name)
+      pcall(function() FX.alert("Claude Shepherd: " .. tostring(item.label or item.name)
         .. " is waiting for approval — nudge NOT sent") end)
       return
     end
@@ -7414,7 +7427,7 @@ local function handleBridgeMsg(msg)
         item.model = tostring(text or ""); FX.patchStatus(item.key, { model = item.model })
       else
         ledgerFor(item, { type = "model_skipped", from = item.model, to = tostring(text or "") })
-        pcall(function() hs.alert.show("Claude Shepherd: no window match for " .. tostring(item.label or item.name) .. " — model NOT switched") end)
+        pcall(function() FX.alert("Claude Shepherd: no window match for " .. tostring(item.label or item.name) .. " — model NOT switched") end)
       end
     elseif a == "effort" then
       if acted == "effort" then
@@ -7426,7 +7439,7 @@ local function handleBridgeMsg(msg)
         item.effort = tostring(text or ""); FX.patchStatus(item.key, { effort = item.effort })
       else
         ledgerFor(item, { type = "effort_skipped", from = item.effort, to = tostring(text or "") })
-        pcall(function() hs.alert.show("Claude Shepherd: no window match for " .. tostring(item.label or item.name) .. " — effort NOT changed") end)
+        pcall(function() FX.alert("Claude Shepherd: no window match for " .. tostring(item.label or item.name) .. " — effort NOT changed") end)
       end
     end
     -- set-mode fires Shift+Tab blind: no hook reports the new mode, so the stored
@@ -7721,6 +7734,12 @@ local HTML = [[
               font-family:var(--font); -webkit-user-select:none; }
   /* global UI scale: WebKit `zoom` scales fonts + layout uniformly off one var */
   body { zoom:var(--ui-scale,1); }
+  #cc-toasts { position:fixed; left:12px; right:12px; bottom:12px; z-index:9999; display:flex; flex-direction:column;
+    align-items:center; gap:6px; pointer-events:none; }
+  .cc-toast { pointer-events:auto; max-width:100%; box-sizing:border-box; font-size:12px; line-height:1.35;
+    color:var(--text-strong); background:var(--surface); border:1px solid #3a4a66; border-radius:8px;
+    padding:6px 10px; box-shadow:0 4px 14px rgba(0,0,0,.35); cursor:pointer; transition:opacity .5s; }
+  .cc-toast.gone { opacity:0; }
   /* density: compact trims the grid gap + tile padding (Appearance > Sizing) */
   body.dense { --gap:5px; --pad:7px; }
   /* reduce motion (Appearance > Sizing): kill the pulse/spin/transition animations */
@@ -15072,6 +15091,22 @@ local HTML = [[
       else { closeRuleEd(); }
     });
 
+    // ---- Toasts (2026-09-11): Shepherd's messages, inside its own panel --------
+    // FX.alert calls this instead of hs.alert's centre-screen overlay, which covered every
+    // window. Up to 3 stacked at the bottom; each fades after a few seconds; click to dismiss.
+    // textContent only: messages carry session names, branches and questions.
+    function ccToast(msg){
+      var box = document.getElementById("cc-toasts");
+      if(!box){ box = document.createElement("div"); box.id = "cc-toasts"; document.body.appendChild(box); }
+      var t = document.createElement("div");
+      t.className = "cc-toast";
+      t.textContent = String(msg == null ? "" : msg);
+      t.onclick = function(){ if(t.parentNode) t.parentNode.removeChild(t); };
+      box.appendChild(t);
+      while(box.children.length > 3) box.removeChild(box.firstChild);
+      setTimeout(function(){ t.classList.add("gone"); }, 5000);
+      setTimeout(function(){ if(t.parentNode) t.parentNode.removeChild(t); }, 5600);
+    }
     // ---- Notification history (roadmap #6) ----------------------------------
     function openNotifications(){ send("open-notifications"); setNotifyBadge(0); }
     function setNotifyBadge(n){
@@ -17122,7 +17157,7 @@ local function bindHotkeys()
       -- approve-front sends a window keystroke -> serialized (R3 #2/#5).
       dispatchSerialized(it, action, function() core.handleAction(FX, it, action) end)
     elseif opts.alertNone then
-      hs.alert.show("Claude Shepherd: nothing waiting")
+      FX.alert("Claude Shepherd: nothing waiting")
     end
   end
   M.hotkeys = {
@@ -17206,7 +17241,7 @@ local function sdApprove()
   if it then
     dispatchSerialized(it, "approve", function() core.handleAction(FX, it, "approve") end)
   else
-    hs.alert.show("Claude Shepherd: nothing waiting")
+    FX.alert("Claude Shepherd: nothing waiting")
   end
 end
 
@@ -17229,7 +17264,7 @@ end
 local function sdTranscribeAndSend(wav, cfg)
   local target = sdVoiceTarget()
   if not target then
-    hs.alert.show("🎙 Voice: focus a project window first (couldn't tell which session)")
+    FX.alert("🎙 Voice: focus a project window first (couldn't tell which session)")
     pcall(os.remove, wav)
     return
   end
@@ -17237,11 +17272,11 @@ local function sdTranscribeAndSend(wav, cfg)
   local model = core.config(cfg, "voice.model", (os.getenv("HOME") or "") .. "/.cache/whisper/ggml-base.en.bin")
   if model:sub(1, 2) == "~/" then model = (os.getenv("HOME") or "") .. model:sub(2) end  -- whisper won't expand ~
   if not hs.fs.attributes(model) then
-    hs.alert.show("🎙 Voice: model missing — " .. model)
+    FX.alert("🎙 Voice: model missing — " .. model)
     pcall(os.remove, wav)
     return
   end
-  hs.alert.show("🎙 Transcribing…")
+  FX.alert("🎙 Transcribing…")
   local autoSend = core.config(cfg, "voice.autoSend", true)
   local wt = hs.task.new(whisper, function(code, stdout, stderr)
     pcall(os.remove, wav)  -- per-recording temp wav: whisper has read it; don't accumulate
@@ -17250,7 +17285,7 @@ local function sdTranscribeAndSend(wav, cfg)
     text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
     -- whisper emits non-speech as a single bracketed token ([BLANK_AUDIO], (beeping)…);
     -- treat a wholly-bracketed result as "nothing said" so silence isn't sent.
-    if text == "" or text:match("^[%[%(].-[%]%)]$") then hs.alert.show("🎙 Voice: nothing heard"); return end
+    if text == "" or text:match("^[%[%(].-[%]%)]$") then FX.alert("🎙 Voice: nothing heard"); return end
     print("[cc-streamdeck] voice -> " .. tostring(target.name) .. ": " .. text)
     if autoSend then
       -- winTarget adapts the raw status item to the camelCase fields the kitty
@@ -17261,18 +17296,18 @@ local function sdTranscribeAndSend(wav, cfg)
       -- as the Improve/audit-review callers.
       dispatchSerialized(target, "voice", function()
         if FX.typeIntoWindow(winTarget(target), text) then
-          hs.alert.show("🎙 → " .. tostring(target.label or target.name) .. ": " .. text:sub(1, 48))
+          FX.alert("🎙 → " .. tostring(target.label or target.name) .. ": " .. text:sub(1, 48))
         else
-          hs.alert.show("🎙 Voice: no window match for " .. tostring(target.label or target.name) .. " — text NOT sent")
+          FX.alert("🎙 Voice: no window match for " .. tostring(target.label or target.name) .. " — text NOT sent")
         end
       end)
     else
       showPanel()
       pcall(function() wv:evaluateJavaScript("insertIntoNudge(" .. jsString(text) .. ")") end)
-      hs.alert.show("🎙 → " .. tostring(target.label or target.name) .. ": " .. text:sub(1, 48))
+      FX.alert("🎙 → " .. tostring(target.label or target.name) .. ": " .. text:sub(1, 48))
     end
   end, { "-m", model, "-f", wav, "-nt", "-np", "-l", "en" })
-  if wt then wt:start() else hs.alert.show("🎙 Voice: couldn't run whisper-cli") end
+  if wt then wt:start() else FX.alert("🎙 Voice: couldn't run whisper-cli") end
 end
 
 -- Tap to start recording the mic (ffmpeg -> 16k mono wav), tap again to stop + transcribe.
@@ -17312,7 +17347,7 @@ local function sdVoiceToggle()
       -- late exit can't reset a newer recording's state. No transcribe: no stop tap.
       sd.recording = false; sd.voiceTask = nil; sd.voiceRec = nil
       pcall(function() sdPaintAction("voice") end)
-      hs.alert.show("🎙 Voice: recording ended (" .. maxSec .. "s cap or mic error) — tap to record")
+      FX.alert("🎙 Voice: recording ended (" .. maxSec .. "s cap or mic error) — tap to record")
       pcall(os.remove, wav)
     end
     if code and code ~= 0 and code ~= 143 and code ~= 255 then
@@ -17322,9 +17357,9 @@ local function sdVoiceToggle()
          "-ar", "16000", "-ac", "1", "-t", tostring(maxSec), "-y", wav })
   if t and t:start() then
     sd.voiceTask = t; sd.voiceRec = rec; sd.recording = true; sdPaintAction("voice")
-    hs.alert.show("🎙 Recording — tap VOICE again to send")
+    FX.alert("🎙 Recording — tap VOICE again to send")
   else
-    hs.alert.show("🎙 Voice: couldn't start ffmpeg (mic permission for Hammerspoon?)")
+    FX.alert("🎙 Voice: couldn't start ffmpeg (mic permission for Hammerspoon?)")
   end
 end
 
@@ -17385,7 +17420,7 @@ do
       for _, it in pairs(byKey) do if it.editor == "kitty" then usingKitty = true; break end end
     end
     if usingKitty and FX.ensureKittyRemote() == "ok" then
-      hs.alert.show("Claude Shepherd: enabled kitty remote control — restart kitty to apply")
+      FX.alert("Claude Shepherd: enabled kitty remote control — restart kitty to apply")
     end
   end
 end

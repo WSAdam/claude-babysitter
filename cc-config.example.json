@@ -155,6 +155,11 @@
     "enabled": true
   },
 
+  "alerts": {
+    "_comment": "Where Shepherd's messages go. By default they are small toasts at the bottom of Shepherd's own panel (and the Hammerspoon console), so nothing covers your other windows. true = the old big centre-screen overlay instead.",
+    "onScreen": false
+  },
+
   "ask": {
     "_comment": "Answer questions from Shepherd (ON by default; needs make setup to wire the cc-ask.sh hook). While Shepherd is running, a session's AskUserQuestion is held by the hook: the card pulses with the question and its answers are buttons in Shepherd, so your click answers the session with no tab. Answer in the tab instead hands it back to the tab's picker, which also takes over after waitSeconds (max 3600) or when Shepherd isn't running. false = questions go straight to the tab as before.",
     "enabled": true,

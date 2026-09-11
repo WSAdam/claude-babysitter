@@ -113,6 +113,8 @@ check("the dashboard loads and runs its first refresh", ok)
 if not ok then print("       " .. tostring(err)); finish() end
 local dash = rawget(_G, "__ccDashboard")
 local core, fx = dash.core, dash.fx
+-- 2026-09-11: messages are FX.alert toasts in the panel, not hs.alert overlays -- capture them there
+do local real = fx.alert; fx.alert = function(m, s) alerts[#alerts + 1] = tostring(m); return real(m, s) end end
 
 local byK = {}
 for _, it in ipairs(fx._shownItems or {}) do byK[it.key] = it end

@@ -267,6 +267,13 @@ showing it in the tab:
 Your answer is `~/.claude/cc-ask/<key>.answer`, bound to the question it's for. The hook is wired by
 `make setup`; `"ask": { "enabled": false }` sends every question straight to the tab again.
 
+### Messages
+
+Shepherd's messages — a session asking you something, a merge starting, an action it refused and
+why — appear as small toasts at the bottom of its own panel (up to three, fading after a few
+seconds; click one to dismiss it) and in the Hammerspoon console. Nothing pops up over your other
+windows; `"alerts": { "onScreen": true }` brings back the big centre-screen overlay.
+
 ## Control actions
 
 The **header** has **New** (opens the new-session modal — see "Spawn"), a **☕

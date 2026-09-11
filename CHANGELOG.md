@@ -4,6 +4,22 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — Messages stay inside Shepherd's panel
+
+### Changed — no more centre-screen overlays
+
+Shepherd's messages ("wave asks: …", "Merging feat/wave…", refusals) used Hammerspoon's big
+centre-screen alert, which covered every window. They now go through one function, `FX.alert`,
+which shows a small toast at the bottom of Shepherd's own panel (up to three, fading after ~5 s,
+click to dismiss) and logs to the console. `"alerts": { "onScreen": true }` brings the overlay back.
+Tests: a source pin that `hs.alert.show` has exactly one caller, and the stubbed-panel suites now
+read the toasts.
+
+### Fixed — a question hid behind merged units on its project card
+
+A unit's held question sat under "also: 2 needing you" because two older merged units ("close its
+tab yourself") ranked the same and the longest-waiting one led the card. A held question now leads.
+
 ## 2026-09-11 — Answer a session's question from Shepherd
 
 ### Added — questions flash on the card and are answered with buttons there

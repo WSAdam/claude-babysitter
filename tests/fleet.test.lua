@@ -57,7 +57,11 @@ local function mkstub()
 end
 local taps, alerts = 0, {}
 local function webviewHandle()
-  return setmetatable({ evaluateJavaScript = function() end },
+  -- 2026-09-11: messages are ccToast calls into the panel (FX.alert), not hs.alert overlays
+  return setmetatable({ evaluateJavaScript = function(_, s)
+      local m = tostring(s or ""):match("^ccToast%((.*)%)$")
+      if m then alerts[#alerts + 1] = m end
+    end },
     { __index = function() return function() return webviewHandle() end end })
 end
 local settingsStore, frame = {}, { x = 0, y = 0, w = 1920, h = 1080 }
