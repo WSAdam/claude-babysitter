@@ -173,6 +173,16 @@ its task with SendMessage, which runs under the unit's own permissions. Merges g
 grant only for a unit's **own session on its own branch** and only after Shepherd's readiness
 check; everything else still waits for Adam's click. Stop ends the grant at once. **[DECISION D-18]**
 
+A session's **question is answered from Shepherd**, not by driving the tab. Nothing outside the
+VS Code webview can click its picker, so the question is caught before it is shown: `cc-ask.sh`, a
+PreToolUse hook on AskUserQuestion, holds it while Shepherd's heartbeat is fresh, publishes a nonce,
+and waits for `cc-ask/<key>.answer` bound to that nonce. It then allows the tool with the answers in
+`updatedInput.answers` (keyed by question text; a list for multi-select; free text accepted), and
+Claude Code skips its picker and gives Claude the answer as the tool result — spiked 2026-09-11 in
+the CLI and a VS Code tab. A release, a timeout (`ask.waitSeconds`, ≤ 3600) or a dead panel emits
+nothing, and the tab's own picker is the fallback. Approve/Deny never act on a held question.
+**[DECISION D-19]**
+
 ## 6. Observability (local, derived, zero extra hooks)
 
 All from the transcript Shepherd already tails — **no extra hooks, no model tokens**:

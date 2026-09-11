@@ -10,6 +10,9 @@
       { "matcher": "", "hooks": [
         { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" pretooluse" },
         { "type": "command", "command": "bash \"$HOME/.claude/cc-approve.sh\"", "timeout": 130 }
+      ] },
+      { "matcher": "AskUserQuestion", "hooks": [
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-ask.sh\"", "timeout": 3630 }
       ] }
     ],
     "PostToolUse": [

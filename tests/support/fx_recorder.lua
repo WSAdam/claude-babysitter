@@ -42,6 +42,7 @@ local function newRecorder()
     loadGeometry    = function() rec("loadGeometry"); return r._geometry end,
     writeImageTemp  = function(b64) rec("writeImageTemp", b64); return r._imagePath end,
     writeDecision   = function(key, value) rec("writeDecision", key, value) end,
+    answerAsk       = function(key, payload) rec("answerAsk", key, payload); return true end,
     spawnSession    = function(editor, project, task) rec("spawnSession", editor, { project = project, task = task }) end,
     readDir         = function() return {} end,
     readFile        = function() return nil end,

@@ -2559,6 +2559,12 @@ function FX.removeStatus(key)
   for _, fn in ipairs(FX.readDir(mergeDir)) do
     if fn:sub(1, #mclaim) == mclaim then os.remove(mergeDir .. "/" .. fn) end
   end
+  -- Adam's answer to a held question (cc_remove drops the same files)
+  os.remove(FX.ASK_DIR .. "/" .. key .. ".answer")
+  local aclaim = key .. ".answer.claim."
+  for _, fn in ipairs(FX.readDir(FX.ASK_DIR)) do
+    if fn:sub(1, #aclaim) == aclaim then os.remove(FX.ASK_DIR .. "/" .. fn) end
+  end
 end
 
 -- ---- Companion extension: close an exact Claude tab (2026-09-11) -----------------
@@ -3094,6 +3100,86 @@ FX._mergeFacts = {}      -- nonce -> { at, facts }
 FX._mergeAlerted = {}    -- "<nonce>|<phase>" -> true: each state alerts once
 FX._mergeReqs = {}       -- key -> request, live sessions only (last tick)
 FX._mergeItems = {}      -- key -> the session's tile (last tick)
+
+-- ---- Shepherd answers (2026-09-11) ------------------------------------------------------
+-- cc-ask.sh holds a session's AskUserQuestion while this panel runs; Adam answers it on the
+-- card and <key>.answer (bound to the nonce on the session's status file, read from disk)
+-- goes back to Claude as the tool's own answers. No keystrokes, no tab.
+FX.ASK_DIR = os.getenv("CC_ASK_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-ask")
+FX._askSent = {}      -- nonce -> true: answered or released once, a second click does nothing
+FX._askAlerted = {}   -- nonce -> true: each question alerts once
+
+-- The nonce the hook wrote, straight from disk: never one the panel remembered.
+function FX.askNonceOnDisk(key)
+  local ok, st = pcall(function() return core.json.decode(FX.readFile(STATUS_DIR .. "/" .. key .. ".json") or "") end)
+  return ok and type(st) == "table" and type(st.ask_nonce) == "string" and st.ask_nonce or nil
+end
+
+function FX.answerAsk(key, payload)
+  if type(payload) ~= "table" or type(payload.nonce) ~= "string" then return false end
+  if FX._askSent[payload.nonce] then return false end   -- already answered
+  if FX.askNonceOnDisk(key) ~= payload.nonce then
+    FX.mergeAlert("⚠️ That question isn't waiting in Shepherd any more -- answer it in its tab")
+    return false
+  end
+  if not FX.writeFileAtomic(FX.ASK_DIR .. "/" .. key .. ".answer", core.json.encode(payload)) then
+    FX.mergeAlert("❌ Couldn't send the answer -- answer it in its tab")
+    return false
+  end
+  FX._askSent[payload.nonce] = true
+  local it, first = byKey[key], nil
+  if type(payload.answers) == "table" then
+    local _, a = next(payload.answers)
+    first = type(a) == "table" and table.concat(a, ", ") or tostring(a)
+  end
+  print("[cc-dashboard] ✅ answered " .. tostring(it and (it.label or it.name) or key) .. ": " .. tostring(first))
+  return true
+end
+
+-- Approve/Deny on a held question: there is no prompt in the tab for their keys (core refuses).
+function FX.refuseAsk(it, _action)
+  FX.mergeAlert("❓ " .. tostring(it and (it.label or it.name) or "That session") .. " is asking a question -- answer it with its buttons in Shepherd")
+end
+
+-- The form's Send answers (several parts / multi-select / free text).
+function FX.answerAskFromPanel(key, text)
+  local payload, why = core.askAnswerFromPanel(byKey[key], text, FX.now())
+  if not payload then FX.mergeAlert("⚠️ " .. tostring(why)); return false end
+  return FX.answerAsk(key, payload)
+end
+
+-- Answer in the tab instead: the hook lets go and the tab shows its own picker.
+function FX.releaseAsk(key)
+  local it = byKey[key]
+  if not core.askHeld(it, FX.now()) then return false end
+  local nonce = FX.askNonceOnDisk(key)
+  if not nonce or FX._askSent[nonce] then return false end
+  if not FX.writeFileAtomic(FX.ASK_DIR .. "/" .. key .. ".answer", core.json.encode({ nonce = nonce, release = true })) then return false end
+  FX._askSent[nonce] = true
+  print("[cc-dashboard] ↩️ question handed back to the tab of " .. tostring(it.label or it.name or key))
+  -- then take Adam to that tab, where its picker is about to appear
+  pcall(function() dispatchSerialized(it, "focus", function() core.handleAction(FX, it, "focus") end) end)
+  return true
+end
+
+-- Every tick: mark held questions (the card and the Instances row answer them) and alert once.
+function FX.annotateAsks(list, bannerOn)
+  local now = FX.now()
+  for _, it in ipairs(list or {}) do
+    it.askHeld, it.askView, it.askLine = nil, nil, nil
+    if core.askHeld(it, now) and not FX._askSent[it.ask_nonce] then
+      it.askHeld = true
+      it.askView = core.askView(it)
+      it.askLine = "❓ asks you: " .. tostring(it.askView and it.askView.question or "")
+      if not FX._askAlerted[it.ask_nonce] then
+        FX._askAlerted[it.ask_nonce] = true
+        local name = tostring(it.label or it.name or "a session")
+        FX.mergeAlert("❓ " .. name .. " asks: " .. core.capChars(tostring(it.askView and it.askView.question or ""), 120) .. "  -- answer it in Shepherd")
+        if bannerOn then FX.notify("Shepherd · " .. name .. " asks", it.askView and it.askView.question or "", { key = it.key }) end
+      end
+    end
+  end
+end
 
 function FX.readMergeRequests()
   local out = {}
@@ -6201,6 +6287,9 @@ local function handleBridgeMsg(msg)
   if a == "merge-hold" then FX.mergeHold(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "merge-diff" then FX.mergeDiff(tostring(payload.v or "")); return end
   if a == "end-session" then FX.endSession(tostring(payload.v or "")); return end   -- tab-less only (verdict in core)
+  -- Shepherd answers (2026-09-11): v = session key, text = JSON picks (checked in core)
+  if a == "answer-ask" then FX.answerAskFromPanel(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  if a == "release-ask" then FX.releaseAsk(tostring(payload.v or "")); return end
   -- Batch driving (2026-09-11): v = the driver's key, text = JSON {id, grantMerge, note}
   if a == "batch-approve" then FX.batchApprove(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "batch-deny" then FX.batchDeny(tostring(payload.v or ""), tostring(payload.text or "")); return end
@@ -8246,6 +8335,19 @@ local HTML = [[
     border-radius:8px; padding:3px 10px; cursor:pointer; font-family:inherit; }
   #d-ask .ask-opt:hover { background:var(--surface-hover); border-color:#5a7bb0; }
   #d-ask .ask-hint { font-size:11px; color:var(--dim); margin-top:6px; }
+  #d-ask.held { border:1px solid var(--st-approval); border-radius:8px; padding:6px 8px 8px; }
+  #d-ask .ask-opt.on { background:var(--accent-text); color:var(--surface); border-color:var(--accent-text); }
+  #d-ask .ask-other { display:block; width:100%; box-sizing:border-box; margin-top:6px; font-size:11px; font-family:inherit;
+    color:var(--text-2); background:var(--surface); border:1px solid #3a4a66; border-radius:6px; padding:3px 8px; }
+  #d-ask .ask-acts { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  #d-ask .ask-send { font-size:11px; font-weight:600; color:var(--surface); background:var(--st-approval); border:0;
+    border-radius:8px; padding:4px 12px; cursor:pointer; font-family:inherit; }
+  #d-ask .ask-send:disabled { opacity:.4; cursor:default; }
+  #d-ask .ask-release { font-size:11px; color:var(--muted); background:none; border:1px solid #3a4a66; border-radius:8px;
+    padding:3px 10px; cursor:pointer; font-family:inherit; }
+  .tile.asking { animation:askglow 1.2s ease-in-out infinite; }
+  @keyframes askglow { 0%,100% { box-shadow:0 0 0 2px var(--st-approval); } 50% { box-shadow:0 0 0 2px var(--st-approval), 0 0 14px var(--st-approval); } }
+  .in-ask { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
   #d-meta { display:none; font-size:11px; color:var(--muted); margin:8px 0 0; }
   #d-lineage { display:none; font-size:11px; color:var(--muted); margin:4px 0 0; }
   /* gate decision log (roadmap #2): last-N grouped gate decisions, dim one-liners */
@@ -10288,6 +10390,8 @@ local HTML = [[
       var rule = BULK_RULES[action]; if(!rule) return [];
       return (items || []).filter(function(it){
         if(it.stale || !it.key) return false;
+        // a question held for Shepherd is answered with its own buttons (mirrors core.selectActionable)
+        if((action === "approve" || action === "deny") && it.askHeld) return false;
         // R3-09: mirror core.remoteActionAllowed so the bulk-bar count matches what
         // Lua selectActionable will actually act on. Remote (bridge) tiles: headless
         // approve/deny only (and only while gate=='waiting'). There is no remote-keystroke
@@ -12634,23 +12738,96 @@ local HTML = [[
       var lbl = document.getElementById("d-automodel-lbl");
       if(lbl) lbl.style.opacity = ok ? "1" : "0.45";
     }
-    // Render the options of a pending AskUserQuestion so they're visible in the
-    // panel (today: read-only + Jump to answer; clickable answering comes later).
+    // A pending AskUserQuestion on the detail panel. While cc-ask.sh holds it for Shepherd
+    // (it.askHeld, 2026-09-11) the buttons ANSWER it: one click for a single-choice question,
+    // otherwise pick per part (+ free text) and Send answers. Not held: the old path (keys on
+    // Kitty, a jump to the tab elsewhere). Built with textContent only -- every label and
+    // question was written by a session.
+    var ASKF = { sig: "", key: null, ask: null, picks: [] };
+    function askInitPicks(ask){ return ask.map(function(){ return { labels: [], other: "" }; }); }
+    function askToggle(ask, picks, qi, label){
+      var p = picks[qi], q = ask[qi] || {};
+      if(!p) return;
+      if(q.multiSelect){
+        var at = p.labels.indexOf(label);
+        if(at >= 0) p.labels.splice(at, 1); else p.labels.push(label);
+      } else {
+        p.labels = (p.labels.length === 1 && p.labels[0] === label) ? [] : [label];
+      }
+    }
+    function askComplete(ask, picks){
+      for(var i = 0; i < ask.length; i++){
+        var p = picks[i];
+        if(!p || (p.labels.length === 0 && String(p.other || "").trim() === "")) return false;
+      }
+      return ask.length > 0;
+    }
+    function askEl(tag, cls, text){
+      var e = document.createElement(tag);
+      if(cls) e.className = cls;
+      if(text != null) e.textContent = String(text);
+      return e;
+    }
     function renderAsk(it){
       var el = document.getElementById("d-ask");
       var ask = it.pending && it.pending.ask;
-      if(!ask || !ask.length){ el.style.display="none"; el.innerHTML=""; return; }
-      // Clickable options: clicking drives the picker (arrow-down to it + Enter).
-      // qi=question index, oi=option index. (Best-effort for multi-question asks.)
-      el.innerHTML = ask.map(function(q, qi){
-        var opts = (q.options||[]).map(function(o, oi){
-          return '<button class="ask-opt" title="'+esc(o.description||"")
-               + '" onclick="answerAsk('+qi+','+oi+')">'+esc(o.label)+'</button>';
-        }).join("");
-        return '<div class="ask-q">'+(q.header?('<b>'+esc(q.header)+'</b> · '):'')+esc(q.question)+'</div>'
-             + '<div class="ask-opts">'+opts+'</div>';
-      }).join("") + '<div class="ask-hint">Click an option — auto-selects on Kitty for a single-question ask; otherwise jumps to the picker (VS Code is mouse-only; multi-question asks are finished by hand)</div>';
-      el.style.display="block";
+      if(!ask || !ask.length){ el.style.display = "none"; el.textContent = ""; ASKF.sig = ""; return; }
+      var held = !!it.askHeld;
+      var sig = it.key + "|" + (held ? String(it.ask_nonce || "") : "-") + "|" + JSON.stringify(ask);
+      if(ASKF.sig === sig) return;   // keep picks and half-typed text across the 1Hz refresh
+      ASKF = { sig: sig, key: it.key, ask: ask, picks: askInitPicks(ask) };
+      var simple = held && ask.length === 1 && !ask[0].multiSelect;
+      el.textContent = "";
+      var send1 = null;
+      ask.forEach(function(q, qi){
+        var head = askEl("div", "ask-q");
+        if(q.header){ head.appendChild(askEl("b", null, q.header)); head.appendChild(document.createTextNode(" · ")); }
+        head.appendChild(document.createTextNode(String(q.question || "")));
+        el.appendChild(head);
+        var row = askEl("div", "ask-opts");
+        (q.options || []).forEach(function(o, oi){
+          var b = askEl("button", "ask-opt", o && o.label);
+          b.title = (o && o.description) || "";
+          b.onclick = function(){
+            if(!held || simple){ answerAsk(qi, oi); return; }
+            askToggle(ASKF.ask, ASKF.picks, qi, o.label);
+            var sel = ASKF.picks[qi].labels;
+            var bs = row.querySelectorAll(".ask-opt");
+            for(var k = 0; k < bs.length; k++){ bs[k].classList.toggle("on", sel.indexOf(bs[k].textContent) >= 0); }
+            if(send1) send1.disabled = !askComplete(ASKF.ask, ASKF.picks);
+          };
+          row.appendChild(b);
+        });
+        el.appendChild(row);
+        if(held){
+          var other = askEl("input", "ask-other");
+          other.type = "text"; other.maxLength = 500; other.placeholder = "Other… (your own answer)";
+          other.oninput = function(){
+            ASKF.picks[qi].other = other.value;
+            if(send1) send1.disabled = !askComplete(ASKF.ask, ASKF.picks);
+          };
+          other.onkeydown = function(e){ if(e.key === "Enter" && send1 && !send1.disabled) send1.click(); };
+          el.appendChild(other);
+        }
+      });
+      if(held){
+        var acts = askEl("div", "ask-acts");
+        send1 = askEl("button", "ask-send", ask.length > 1 ? "Send answers" : "Send");
+        send1.disabled = true;
+        send1.onclick = function(){
+          if(!askComplete(ASKF.ask, ASKF.picks)) return;
+          send("answer-ask", ASKF.key, JSON.stringify(ASKF.picks));
+        };
+        var rel = askEl("button", "ask-release", "Answer in the tab instead");
+        rel.onclick = function(){ send("release-ask", ASKF.key); };
+        acts.appendChild(send1); acts.appendChild(rel);
+        el.appendChild(acts);
+      }
+      el.appendChild(askEl("div", "ask-hint", held
+        ? (simple ? "Click an answer — it goes straight to the session, no tab needed" : "Pick an answer for each part, then Send answers — it goes straight to the session")
+        : "Click an option — auto-selects on Kitty for a single-question ask; otherwise jumps to the picker (VS Code is mouse-only; multi-question asks are finished by hand)"));
+      el.classList.toggle("held", held);
+      el.style.display = "block";
     }
     function answerAsk(qi, oi){ if(selectedKey) send("answer", selectedKey, String(oi)); }
     // Small badges: detected editor + live permission mode + effort + model.
@@ -13094,7 +13271,14 @@ local HTML = [[
         var st = /^[a-z]+$/.test(im.status || "") ? im.status : "idle";
         var mg = im.merge || null;   // ready to merge (core.mergeView, trimmed by instancesPayload)
         var needs = st === "approval" || st === "error" || !!im.hung || !!(mg && mg.needsYou);
-        var sub = im.pendingSummary ? "wants: " + im.pendingSummary : ((mg && mg.line) || (im.tabless ? TABLESS_T : "") || im.sessTitle || "");
+        var ak = im.ask || null;   // a question held for Adam (core.askView): answered right on the row
+        var sub = ak ? "❓ asks you: " + (ak.question || "") : (im.pendingSummary ? "wants: " + im.pendingSummary : ((mg && mg.line) || (im.tabless ? TABLESS_T : "") || im.sessTitle || ""));
+        var askRow = "";
+        if(ak){
+          askRow = '<div class="in-ask">' + (ak.simple
+            ? (ak.options || []).map(function(lbl, oi){ return '<button class="in-btn" data-inact="ask" data-k="' + esc(im.key) + '" data-oi="' + oi + '">' + esc(lbl) + '</button>'; }).join("")
+            : '<button class="in-btn" data-inact="details" data-k="' + esc(im.key) + '">Answer…</button>') + '</div>';
+        }
         var canMerge = !!(mg && mg.phase === "requested" && mg.ready && !mg.queued && !mg.sent);
         html += '<div class="in-row' + (needs ? ' needs' : '') + (im.hidden ? ' hid' : '') + '">'
              +   '<span class="in-dot in-st-' + st + '"></span>'
@@ -13107,6 +13291,7 @@ local HTML = [[
              +     '<div class="in-sub">' + esc(instStatusWord(im))
              +       (im.since ? ' · <span class="in-age" data-since="' + esc(im.since) + '">' + esc(fmtAge(im.since)) + '</span>' : '')
              +       (sub ? ' · ' + esc(sub) : '') + '</div>'
+             +     askRow
              +   '</div>'
              +   '<div class="in-acts">'
              +     (im.hidden
@@ -13167,6 +13352,7 @@ local HTML = [[
         else if(act === "details"){ closeInstances(); selectTile(k); }
         else if(act === "unhide"){ send("unhide-tile", k); }
         else if(act === "merge"){ send("merge-approve", k); }
+        else if(act === "ask"){ send("answer", k, String(b.getAttribute("data-oi") || "0")); }
         else if(act === "end"){ endSessionFor(k); }
         else if(act === "open"){ INST.opening[k] = Date.now(); send("open-worktree", INST.stackKey, k); renderInstances(true); }
       });
@@ -15053,7 +15239,9 @@ local HTML = [[
       // A SPEECH glyph, not an arrow: an arrow here read as "this session is
       // running something", which is what the green bg-run pill means.
       var meta = it.sessTitle ? ("\ud83d\udcac " + it.sessTitle) : "";
-      if(st === "approval" && it.pending && it.pending.summary){
+      if(it.askHeld && it.askLine){
+        meta = it.askLine;   // a question held for Adam: answered on the card (cc-ask.sh, 2026-09-11)
+      } else if(st === "approval" && it.pending && it.pending.summary){
         meta = "wants: " + it.pending.summary;
       } else if(st === "error"){
         meta = (it.error_reason && it.error_reason !== "unknown" ? "[" + it.error_reason.replace(/_/g," ") + "] " : "")
@@ -15076,7 +15264,7 @@ local HTML = [[
       if(it.hung){ meta = (meta ? meta + " · " : "") + "⏳ stalled"; }
       if(it.looping){ meta = (meta ? meta + " · " : "") + "⟳ looping"; }   // L5 loop watchdog
       if(it.churn){ meta = (meta ? meta + " · " : "") + "♻️" + it.churn; }   // respawn/clear churn today
-      var cls = "tile s-" + stCls + (it.stale && !bgRunning(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + ((it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou) ? " merge" : "") + (it.key === selectedKey ? " sel" : "");
+      var cls = "tile s-" + stCls + (it.stale && !bgRunning(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + ((it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou) ? " merge" : "") + (it.askHeld ? " asking" : "") + (it.key === selectedKey ? " sel" : "");
       // select + double-click jump are decided at mousedown by onGridMouseDown (below):
       // a grid rebuild mid-press detaches the tile, so inline click handlers were lost
       // data-stack: this card's project stack (focus-group + the Instances button read it)
@@ -16754,6 +16942,7 @@ function FX._refreshBody()
   FX.annotateFleet(list, cfg, bannerOn)    -- batch driving (2026-09-11): before merges (delegation)
   FX.annotateMerges(list, cfg, bannerOn)
   FX.annotateTabless(list, cfg)   -- a claude process with no tab in its window (2026-09-11)
+  FX.annotateAsks(list, bannerOn)   -- a question held for Adam by cc-ask.sh (2026-09-11)
   -- Two sessions in ONE project used to render as IDENTICAL cards: the name (and
   -- any relabel) is per-projectKey, so nothing on either tile said which chat it
   -- was. Give each of those tiles its own chat title -- and only those, so a

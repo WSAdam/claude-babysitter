@@ -52,6 +52,7 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **developer**, I want to let a Claude session drive a batch of worktree units on my single approval, so that parallel work doesn't need me to open tabs, press Return and click every merge.
 - As a **fleet operator**, I want to decide in the batch approval whether Claude may merge its units when green, so that I keep the last word on main when I want it.
 - As a **fleet operator**, I want a batch's merge permission to cover only each unit's own session and branch, and Stop batch to revoke it at once, so that the grant can't be stretched.
+- As a **developer**, I want a session's question to flash on its card with its answers as buttons, and my click to answer it, so that a session waiting on me never waits for me to find its tab.
 
 ## Session observability
 

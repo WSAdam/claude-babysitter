@@ -79,6 +79,12 @@ and the README's "Testing & development" section.
   the session writes. Tabs open one per repo at a time (that's what makes `core.newTabSession`
   unambiguous); merges on a grant go only through `core.fleetDelegatedMerge` (the unit's own
   session and branch) plus the normal readiness check and queue.
+- A question `cc-ask.sh` holds (`core.askHeld`: `ask_nonce` + `ask_until` on the status file,
+  the questions in `pending.ask`) is answered only through `~/.claude/cc-ask/<key>.answer`, bound
+  to the nonce READ FROM DISK (`FX.answerAsk`), never by keystrokes -- its tab has no picker
+  up. Approve/Deny skip it. The hook's group has its own matcher (AskUserQuestion) and a
+  3630s timeout; never merge it into the matcher-"" group. Its answer file is in BOTH
+  `cc_remove` and `FX.removeStatus`.
 - Scripts reach `~/.claude` by RENAME (`make install`, `install.sh`): bash reads a running
   script lazily, so rewriting one in place garbles a hook that's mid-run.
 - `vscode://anthropic.claude-code/open?prompt=` opens a new Claude tab in the ACTIVE editor

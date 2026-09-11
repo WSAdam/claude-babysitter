@@ -2444,10 +2444,11 @@ do
   local got = {}
   for _, n in ipairs(core.OUR_HOOK_SCRIPTS) do got[#got + 1] = n end
   table.sort(got)
-  local wantScripts = { "cc-approve.sh", "cc-popup.sh", "cc-status.sh" }  -- sorted
+  -- 2026-09-11 requirement change: cc-ask.sh (the question hook) joined the set.
+  local wantScripts = { "cc-approve.sh", "cc-ask.sh", "cc-popup.sh", "cc-status.sh" }  -- sorted
   local scriptsOk = (#got == #wantScripts)
   for i = 1, #wantScripts do if got[i] ~= wantScripts[i] then scriptsOk = false end end
-  check("mergeHooks: OUR_HOOK_SCRIPTS == {cc-approve, cc-popup, cc-status}.sh exactly", scriptsOk)
+  check("mergeHooks: OUR_HOOK_SCRIPTS == {cc-approve, cc-ask, cc-popup, cc-status}.sh exactly", scriptsOk)
 
   -- L5 hooks inspector: flatten settings.json hooks into per-hook rows
   local settings = { hooks = {
@@ -7906,7 +7907,9 @@ do
   -- 2026-09-10: 8 -> 9 for the shared-window keystroke guard ("sharedwin", flagged new).
   -- 2026-09-11: 9 -> 10 for the ready-to-merge flow ("merge", flagged new).
   -- 2026-09-11: 10 -> 11 for batch driving ("fleet", flagged new).
-  eq("FEATURES: the 11 new features are flagged", newCount, 11)
+  -- 2026-09-11: 11 -> 12 for answering questions from Shepherd ("answers", flagged new).
+  eq("FEATURES: the 12 new features are flagged", newCount, 12)
+  check("FEATURES: lists answering questions from Shepherd", keys.answers == true)
 end
 
 -- F4: transcript peek (user + assistant rows, chronological, noise filtered)
@@ -9131,6 +9134,105 @@ do
   local treg = { ["9"] = { at = 995, tabs = { { label = "Claude Code", unit = "b1:cheer" } } } }
   local tl2 = core.tablessKeys(tlist, treg, { u1 = { "Claude Code", "unit:b1:cheer" }, u2 = { "Old chat" } }, 1000)
   check("tab-less: a unit's session matches its tagged tab, so only the other one is tab-less", not tl2.u1 and tl2.u2 == true)
+end
+
+-- ---- Shepherd answers: a session's question answered from its card (2026-09-11) ----------
+-- cc-ask.sh holds a session's AskUserQuestion while Shepherd runs (ask_nonce + ask_until on the
+-- status file, the questions in pending.ask); Adam's click becomes <key>.answer, which the hook
+-- hands to Claude as the tool's own answers. No keystrokes, no tab.
+do
+  local Q1 = { { question = "Which colour?", header = "Colour", multiSelect = false,
+                 options = { { label = "Red", description = "warm" }, { label = "Blue" } } } }
+  local Q2 = { { question = "Which toppings?", multiSelect = true, options = { { label = "Cheese" }, { label = "Ham" } } },
+               { question = "Which size?", multiSelect = false, options = { { label = "Small" }, { label = "Large" } } } }
+  local function held(over)
+    local it = { key = "k1", name = "proj", editor = "vscode", status = "approval", ask_nonce = "77.990", ask_until = 1900,
+                 pending = { tool = "AskUserQuestion", summary = "Which colour?", ask = Q1 } }
+    for k, v in pairs(over or {}) do it[k] = v end
+    return it
+  end
+  check("askHeld: a question the hook is holding", core.askHeld(held(), 1000) == true)
+  check("askHeld: no nonce (the hook isn't holding it: the tab's picker)", core.askHeld(held({ ask_nonce = "" }), 1000) == false)
+  check("askHeld: past ask_until (the tab's picker took over)", core.askHeld(held(), 1900) == false)
+  check("askHeld: not waiting on Adam any more", core.askHeld(held({ status = "working" }), 1000) == false)
+  check("askHeld: no questions published", core.askHeld(held({ pending = { tool = "Bash", summary = "ls" } }), 1000) == false)
+  check("askHeld: a remote session is never answered from here", core.askHeld(held({ remote = { host = "box" } }), 1000) == false)
+
+  local p = core.askAnswerPayload(Q1, { { labels = { "Blue" } } }, "n1")
+  check("answer: one option of a single-choice question", p and p.nonce == "n1" and p.answers["Which colour?"] == "Blue")
+  local p0, why0 = core.askAnswerPayload(Q1, { { labels = { "Green" } } }, "n1")
+  check("answer: a label that isn't an option is refused  (" .. tostring(why0) .. ")", p0 == nil)
+  check("answer: two picks for a single-choice question are refused",
+        core.askAnswerPayload(Q1, { { labels = { "Red", "Blue" } } }, "n1") == nil)
+  check("answer: nothing picked is refused", core.askAnswerPayload(Q1, { {} }, "n1") == nil)
+  check("answer: no nonce is refused", core.askAnswerPayload(Q1, { { labels = { "Red" } } }, "") == nil)
+  local po = core.askAnswerPayload(Q1, { { labels = { "Red" }, other = "  teal, actually " } }, "n1")
+  check("answer: free text wins over a pick, trimmed (the picker's Other)", po and po.answers["Which colour?"] == "teal, actually")
+  check("answer: free text over 500 characters is refused",
+        core.askAnswerPayload(Q1, { { other = string.rep("x", 501) } }, "n1") == nil)
+  local pm = core.askAnswerPayload(Q2, { { labels = { "Cheese", "Ham" }, other = "olives" }, { labels = { "Large" } } }, "n2")
+  check("answer: a multi-select answer is a list, free text added to it",
+        pm and type(pm.answers["Which toppings?"]) == "table" and table.concat(pm.answers["Which toppings?"], ",") == "Cheese,Ham,olives")
+  check("answer: ...and every part of a several-part question is answered", pm and pm.answers["Which size?"] == "Large")
+  check("answer: a part left unanswered is refused",
+        core.askAnswerPayload(Q2, { { labels = { "Cheese" } } }, "n2") == nil)
+  check("answer: a multi-select with nothing picked is refused",
+        core.askAnswerPayload(Q2, { { labels = {} }, { labels = { "Small" } } }, "n2") == nil)
+  local dup = { { question = "Same?", options = { { label = "A" } } }, { question = "Same?", options = { { label = "B" } } } }
+  check("answer: two parts with the same text can't be told apart -> refused",
+        core.askAnswerPayload(dup, { { labels = { "A" } }, { labels = { "B" } } }, "n3") == nil)
+  local enc = core.json.decode(core.json.encode(pm))
+  check("answer: the payload survives JSON (a list stays a list)",
+        type(enc.answers["Which toppings?"]) == "table" and enc.answers["Which toppings?"][3] == "olives")
+
+  local fromPanel = core.askAnswerFromPanel(held(), core.json.encode({ { labels = { "Red" } } }), 1000)
+  check("from the panel: picks JSON -> the payload with the session's own nonce",
+        fromPanel and fromPanel.nonce == "77.990" and fromPanel.answers["Which colour?"] == "Red")
+  local fp2, fwhy = core.askAnswerFromPanel(held({ status = "working" }), core.json.encode({ { labels = { "Red" } } }), 1000)
+  check("from the panel: a question no longer held is refused  (" .. tostring(fwhy) .. ")", fp2 == nil)
+  check("from the panel: garbage JSON is refused", core.askAnswerFromPanel(held(), "{not json", 1000) == nil)
+
+  -- handleAction "answer": a held question is answered with a file, never keystrokes.
+  local r = newRecorder()
+  eq("held + answer (VS Code): handled", core.handleAction(r.fx, held(), "answer", "1"), "answer")
+  eq("held + answer: answered from Shepherd", r.last().op, "answerAsk")
+  check("held + answer: option #1 is Blue, bound to the nonce",
+        r.last().b.answers["Which colour?"] == "Blue" and r.last().b.nonce == "77.990")
+  r = newRecorder()
+  core.handleAction(r.fx, held({ editor = "kitty" }), "answer", "0")
+  eq("held + answer (kitty): a file too, no keystrokes", r.last().op, "answerAsk")
+  r = newRecorder()
+  eq("held + answer in a shared window: still answered (it types nothing)",
+     core.handleAction(r.fx, held({ sharedWindow = true, host_window = "9" }), "answer", "0"), "answer")
+  eq("held + answer in a shared window: answerAsk", r.last() and r.last().op, "answerAsk")
+  r = newRecorder()
+  eq("held + a several-part question: nothing from a bare option index",
+     core.handleAction(r.fx, held({ pending = { tool = "AskUserQuestion", ask = Q2 } }), "answer", "0"), nil)
+  check("held + a several-part question: no keystroke and no jump", r.count() == 0)
+  r = newRecorder()
+  core.handleAction(r.fx, held({ ask_nonce = false }), "answer", "1")
+  eq("not held (VS Code): today's jump to the tab", r.last().op, "focusWindow")
+  check("actionIsHeadless: a held answer focuses nothing", core.actionIsHeadless(held({ editor = "kitty" }), "answer", 1000) == true)
+  r = newRecorder()
+  eq("held + Approve: refused (no prompt in the tab for its keys)", core.handleAction(r.fx, held({ editor = "kitty" }), "approve"), nil)
+  check("held + Approve: no keystroke", r.count() == 0)
+  r = newRecorder()
+  eq("held + Deny: refused too", core.handleAction(r.fx, held({ editor = "kitty" }), "deny"), nil)
+  check("held + Deny: no keystroke", r.count() == 0)
+  local bulk = core.selectActionable({ held({ askHeld = true }), { key = "k2", status = "approval" } }, "approve")
+  check("Approve all skips a held question", #bulk == 1 and bulk[1] == "k2")
+
+  local v = core.askView(held())
+  check("askView: the first question, its options, one click answers it",
+        v.question == "Which colour?" and v.header == "Colour" and v.options[2] == "Blue" and v.simple == true and v.count == 1)
+  check("askView: a several-part question needs the form", core.askView(held({ pending = { ask = Q2 } })).simple == false)
+  local ip = core.instancesPayload("s", { held({ askHeld = true, askView = core.askView(held()) }) }, {}, {}, {})
+  check("Instances: a held question rides the row", ip.members[1].ask and ip.members[1].ask.question == "Which colour?")
+  check("Instances: ...and only when held", core.instancesPayload("s", { held() }, {}, {}, {}).members[1].ask == nil)
+
+  local hooked = false
+  for _, n in ipairs(core.OUR_HOOK_SCRIPTS) do if n == "cc-ask.sh" then hooked = true end end
+  check("cc-ask.sh is one of Shepherd's hooks (the doctor counts it)", hooked)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

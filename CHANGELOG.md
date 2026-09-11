@@ -4,6 +4,23 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — Answer a session's question from Shepherd
+
+### Added — questions flash on the card and are answered with buttons there
+
+In the first batch run a unit waited on Adam's word; its card flashed, but Focus only brought him
+to the tab, and nothing in Shepherd could answer it. Nothing outside the VS Code webview can click
+Claude's picker, so the question is now caught before it is shown: a new PreToolUse hook,
+`cc-ask.sh` (matcher AskUserQuestion, wired by `make setup`), holds it while Shepherd runs. The card
+pulses with *❓ asks you: …* and alerts once; the answers are buttons in its detail panel and on its
+Instances row (one click for a single-choice question; pick per part, free text, **Send answers**
+otherwise). The click writes `~/.claude/cc-ask/<key>.answer`, bound to the question's nonce, and the
+hook hands it to Claude as the tool's own answer (`updatedInput.answers` — spiked in the CLI and a
+VS Code tab). **Answer in the tab instead**, `ask.waitSeconds` (default 900) or a panel that isn't
+running all fall back to the tab's picker. Approve / Deny / Approve all skip a held question.
+Tests: `tests/ask-hold.test.sh` (the hook), `tests/ask.test.lua` (the real panel under a stubbed hs),
+`tests/ask-form.test.js` (the form), core and install cases, the escaping tripwire.
+
 ## 2026-09-11 — A batch unit's tab is known without a name
 
 ### Fixed — tabs opened for batch units could never be closed or focused

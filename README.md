@@ -247,6 +247,26 @@ Ask a Claude session to run several units in parallel and it can drive the whole
 Your approval lives in Shepherd (`~/.claude/cc-fleet/<id>.state.json`), never in the proposal's own
 file. `"fleet": { "enabled": false }` makes Shepherd ignore proposals.
 
+### Answer questions from Shepherd
+
+When a session needs your decision it asks with Claude Code's question tool (AskUserQuestion).
+While Shepherd is running, the `cc-ask.sh` hook **holds that question for Shepherd** instead of
+showing it in the tab:
+
+- **The card pulses** and says *❓ asks you: …*, it leads its project card, and you get one alert
+  (plus an OS banner if approval banners are on).
+- **The answers are buttons** in its detail panel and on its Instances row. One click on a
+  single-choice question answers it. With several parts or multi-select, pick per part (or type your
+  own answer under **Other…**) and press **Send answers**. Either way the answer goes straight to
+  the session as the tool's own answer; no tab to find, no keystrokes.
+- **Answer in the tab instead** hands the question back to the tab's own picker and takes you
+  there. The tab's picker also takes over after `ask.waitSeconds` (default 900) and whenever
+  Shepherd isn't running, so nothing waits on a panel that's gone.
+- Approve / Deny (and Approve all) skip a held question: it's answered with its own buttons.
+
+Your answer is `~/.claude/cc-ask/<key>.answer`, bound to the question it's for. The hook is wired by
+`make setup`; `"ask": { "enabled": false }` sends every question straight to the tab again.
+
 ## Control actions
 
 The **header** has **New** (opens the new-session modal — see "Spawn"), a **☕

@@ -47,6 +47,13 @@ assert_json "Notification runs cc-status FIRST" "$CDIR/settings.json" \
 # 60-120s window would then dead-end on a decision file nothing consumes).
 assert_json "cc-approve.sh hook carries a 130s timeout" "$CDIR/settings.json" \
   '.hooks.PreToolUse[0].hooks[] | select(.command | contains("cc-approve.sh")) | .timeout' "130"
+# cc-ask.sh holds a question for Shepherd for up to 3600s (2026-09-11): its own group, so it
+# runs for AskUserQuestion only, with a timeout above that wait.
+assert_json "cc-ask.sh runs for AskUserQuestion only" "$CDIR/settings.json" \
+  '[.hooks.PreToolUse[] | select(.hooks[].command | contains("cc-ask.sh")) | .matcher] | join(",")' "AskUserQuestion"
+assert_json "cc-ask.sh carries a 3630s timeout" "$CDIR/settings.json" \
+  '.hooks.PreToolUse[].hooks[] | select(.command | contains("cc-ask.sh")) | .timeout' "3630"
+exists "copies cc-ask.sh -> claude dir" "$CDIR/cc-ask.sh"
 exists "creates init.lua" "$HSDIR/init.lua"
 assert_eq "init.lua has the dofile" "1" "$(grep -c 'claude-dashboard.lua' "$HSDIR/init.lua")"
 
@@ -125,8 +132,14 @@ CC_INSTALL_CLAUDE_DIR="$CDIR5" CC_INSTALL_HS_DIR="$HSDIR5" CC_INSTALL_NO_APP=1 \
   bash "$ROOT/install.sh" >/dev/null 2>&1
 assert_json "migration: existing cc-approve.sh entry gains timeout 130" "$CDIR5/settings.json" \
   '.hooks.PreToolUse[0].hooks[1].timeout' "130"
+# 2026-09-11 requirement change: the migration now also adds cc-ask.sh's own group, so
+# PreToolUse holds 2 groups; the matcher-"" group itself is still never duplicated.
 assert_json "migration: PreToolUse group not duplicated" "$CDIR5/settings.json" \
-  '.hooks.PreToolUse | length' "1"
+  '[.hooks.PreToolUse[] | select(.matcher == "")] | length' "1"
+assert_json "migration: an older install gains cc-ask.sh in its own AskUserQuestion group" "$CDIR5/settings.json" \
+  '[.hooks.PreToolUse[] | select(.matcher == "AskUserQuestion") | .hooks[].command | contains("cc-ask.sh")] | length' "1"
+assert_json "migration: ...and never in the every-tool group" "$CDIR5/settings.json" \
+  '[.hooks.PreToolUse[] | select(.matcher == "") | .hooks[].command | select(contains("cc-ask.sh"))] | length' "0"
 assert_json "migration: cc-status.sh entry untouched (no timeout)" "$CDIR5/settings.json" \
   '.hooks.PreToolUse[0].hooks[0] | has("timeout")' "false"
 before5="$(cat "$CDIR5/settings.json")"
@@ -393,6 +406,8 @@ ls -a "$MCDIR" | grep -q '\.tmp\.' && got=leftovers || got=clean
 assert_eq "make install: leaves no temp files behind" "clean" "$got"
 exists "install.sh: ships cc-merge.sh too" "$CDIR/cc-merge.sh"
 exists "install.sh: ships cc-fleet.sh too" "$CDIR/cc-fleet.sh"
+[ -x "$MCDIR/cc-ask.sh" ] && cmp -s "$ROOT/cc-ask.sh" "$MCDIR/cc-ask.sh" && got=yes || got=no
+assert_eq "make install: ships cc-ask.sh, executable" "yes" "$got"
 
 # ---- make reload never blocks a deploy (2026-09-11) ----
 # The reload drops Hammerspoon's IPC port; an `hs -c` caught mid-reply then waited forever

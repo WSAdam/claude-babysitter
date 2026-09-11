@@ -33,6 +33,9 @@ echo ""
 echo "== bash: batch driving (cc-fleet.sh) =="
 bash "$DIR/fleet.test.sh" || fail=1
 echo ""
+echo "== bash: questions held for Shepherd (cc-ask.sh) =="
+bash "$DIR/ask-hold.test.sh" || fail=1
+echo ""
 echo "== bash: audit ledger =="
 bash "$DIR/ledger.test.sh" || fail=1
 echo ""
@@ -106,6 +109,12 @@ HOME="$(mktemp -d)" lua "$DIR/fleet.test.lua" || fail=1
 echo ""
 echo "== lua: ready to merge -- review, one merge per repo, Not yet (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/merge-request.test.lua" || fail=1
+echo ""
+echo "== lua: Shepherd answers -- a held question answered from the card (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/ask.test.lua" || fail=1
+echo ""
+echo "== node: the answer form (behavioral, runs the shipped form helpers) =="
+node "$DIR/ask-form.test.js" || fail=1
 echo ""
 echo "== lua: New worktree tab opens a prefilled Claude tab, never a keystroke (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/new-worktree-tab.test.lua" || fail=1

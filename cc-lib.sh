@@ -317,6 +317,9 @@ CC_AUTOMODEL_DIR="${CC_AUTOMODEL_DIR:-${HOME}/.claude/cc-automodel}"
 # Ready-to-merge requests (cc-merge.sh) and Shepherd's answers to them, per session key.
 # Default MUST match cc-merge.sh's and the dashboard's FX.MERGE_DIR.
 CC_MERGE_DIR="${CC_MERGE_DIR:-${HOME}/.claude/cc-merge}"
+# Adam's answers to a held AskUserQuestion (cc-ask.sh), per session key. Default MUST match
+# the dashboard's FX.ASK_DIR.
+CC_ASK_DIR="${CC_ASK_DIR:-${HOME}/.claude/cc-ask}"
 
 # Remove a session entirely (used by SessionEnd) plus any stray decision/claim
 # file and the per-session gated-tools override, approveRepeats memo, autopilot
@@ -326,7 +329,8 @@ cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_decision_file "$1")" "$(cc_decision_file "$1")".claim.* \
     "$CC_GATE_TOOLS_DIR/$1" "$CC_APPROVED_DIR/$1" "$CC_AUTOPILOT_DIR/$1" \
     "$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1" "$CC_AUTOMODEL_DIR/$1" \
-    "$CC_MERGE_DIR/$1.json" "$CC_MERGE_DIR/$1.decision" "$CC_MERGE_DIR/$1.decision".claim.* 2>/dev/null || true
+    "$CC_MERGE_DIR/$1.json" "$CC_MERGE_DIR/$1.decision" "$CC_MERGE_DIR/$1.decision".claim.* \
+    "$CC_ASK_DIR/$1.answer" "$CC_ASK_DIR/$1.answer".claim.* 2>/dev/null || true
 }
 
 # ---- Audit/event ledger ----------------------------------------------------

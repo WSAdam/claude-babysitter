@@ -141,7 +141,7 @@ install_file() {
 }
 
 # 1. Scripts + core -> ~/.claude ; dashboard + core -> ~/.hammerspoon.
-for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-core.lua; do
+for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-core.lua; do
   install_file "$HERE/$f" "$CLAUDE_DIR"
 done
 chmod +x "$CLAUDE_DIR"/cc-*.sh
@@ -207,6 +207,15 @@ if have_jq; then
                 end
             end)
       | .hooks |= migrate_timeout
+      # cc-ask.sh (2026-09-11) lives in its OWN PreToolUse group (matcher AskUserQuestion,
+      # a long timeout: it holds the question for Shepherd). The per-entry upgrade above
+      # would drop it into the matcher-"" group and run it for every tool, so an install
+      # that predates it gets the template group itself, once.
+      | if ([ (.hooks.PreToolUse // [])[]?.hooks[]?.command? // empty ] | any(contains("cc-ask.sh"))) then .
+        elif ((.hooks.PreToolUse // []) | type) != "array" then .
+        else .hooks.PreToolUse = ((.hooks.PreToolUse // [])
+               + [ $tmpl.hooks.PreToolUse[] | select(.matcher == "AskUserQuestion") ])
+        end
     ' "$SETTINGS" 2>/dev/null)"
     if [ -z "$merged" ]; then
       echo "⚠️  couldn't parse $SETTINGS — leaving it; merge $TEMPLATE by hand"

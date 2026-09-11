@@ -286,6 +286,12 @@ function M.handleAction(fx, item, action, text)
     origin = item.originDir,   -- the folder it started in: the window it lives in (pickWindow)
     shared = item.sharedWindow,
   }
+  -- 2026-09-11: a question cc-ask.sh holds has no prompt in the tab for Approve/Deny's keys
+  -- to land on; it is answered with its own buttons (Approve all skips it too).
+  if (action == "approve" or action == "deny") and item.gate ~= "waiting" and M.askHeld(item, fx.now and fx.now() or nil) then
+    if fx.refuseAsk then fx.refuseAsk(item, action) end
+    return nil
+  end
   if action == "focus" then
     -- A jump that landed marks the instance seen: a finished one stops leading its
     -- project card until it finishes again (M.instanceTier). A miss marks nothing.
@@ -379,6 +385,15 @@ function M.handleAction(fx, item, action, text)
         "set-mode keys not delivered for " .. tostring(item.name) .. " -- mode NOT re-based") then
       return nil
     end
+  elseif action == "answer" and M.askHeld(item, fx.now and fx.now() or nil) then
+    -- 2026-09-11: cc-ask.sh is holding the question, so there is no picker to drive: the
+    -- answer is a file the hook hands to Claude. A bare option index only answers one
+    -- single-choice question; a several-part one is answered from the card's form.
+    local v = M.askView(item)
+    local label = v and v.simple and v.options[(math.floor(tonumber(text) or -1)) + 1]
+    local payload = label and M.askAnswerPayload(item.pending.ask, { { labels = { label } } }, item.ask_nonce)
+    if not payload or not fx.answerAsk then return nil end
+    if fx.answerAsk(item.key, payload) == false then return nil end
   elseif action == "answer" then
     -- Select option #text (0-based) in a pending single-select AskUserQuestion:
     -- only a terminal TUI (kitty) responds to synthesized arrow/Enter; the VS Code
@@ -429,6 +444,87 @@ end
 function M.askIsMultiQuestion(item)
   local ask = item and item.pending and item.pending.ask
   return type(ask) == "table" and #ask > 1
+end
+
+-- ---- Shepherd answers (2026-09-11) ----------------------------------------------------
+-- cc-ask.sh (PreToolUse, matcher AskUserQuestion) holds a session's question while Shepherd
+-- runs: it writes ask_nonce + ask_until on the status file and waits for <key>.answer. The
+-- questions themselves arrive as pending.ask (cc-status.sh).
+
+-- Is the hook holding this session's question for Adam to answer here?
+function M.askHeld(item, now)
+  if type(item) ~= "table" or item.remote then return false end
+  if type(item.ask_nonce) ~= "string" or item.ask_nonce == "" then return false end
+  if item.status ~= "approval" then return false end
+  local ask = type(item.pending) == "table" and item.pending.ask
+  if type(ask) ~= "table" or #ask == 0 then return false end
+  local u = tonumber(item.ask_until)
+  return u ~= nil and (tonumber(now) or os.time()) < u
+end
+
+M.ASK_OTHER_MAX = 500
+-- Adam's picks -> the answer file's body. picks[i] = { labels = {…}, other = "free text" } for
+-- question i. Keys are the question texts (Claude Code's `answers` shape); a multi-select
+-- answer is a list, free text replaces a single-choice pick (the picker's Other). nil + why
+-- when anything is missing or not an option, so a half answer never reaches the session.
+function M.askAnswerPayload(ask, picks, nonce)
+  if type(ask) ~= "table" or #ask == 0 then return nil, "no question" end
+  if type(nonce) ~= "string" or nonce == "" then return nil, "no nonce" end
+  if type(picks) ~= "table" then return nil, "no answer" end
+  local answers = {}
+  for i, q in ipairs(ask) do
+    local qt = type(q) == "table" and q.question
+    if type(qt) ~= "string" or qt == "" then return nil, "part " .. i .. " has no question" end
+    if answers[qt] ~= nil then return nil, "two parts ask the same thing" end
+    local p = picks[i]
+    if type(p) ~= "table" then return nil, "part " .. i .. " isn't answered" end
+    local valid = {}
+    for _, o in ipairs(type(q.options) == "table" and q.options or {}) do
+      if type(o) == "table" and type(o.label) == "string" then valid[o.label] = true end
+    end
+    local labels, seen = {}, {}
+    for _, l in ipairs(type(p.labels) == "table" and p.labels or {}) do
+      if type(l) ~= "string" or not valid[l] then return nil, "not an option: " .. tostring(l) end
+      if not seen[l] then seen[l] = true; labels[#labels + 1] = l end
+    end
+    local other = type(p.other) == "string" and (p.other:gsub("^%s+", ""):gsub("%s+$", "")) or ""
+    if #other > M.ASK_OTHER_MAX then return nil, "the free text is too long" end
+    if q.multiSelect == true then
+      if other ~= "" then labels[#labels + 1] = other end
+      if #labels == 0 then return nil, "part " .. i .. " isn't answered" end
+      answers[qt] = labels
+    elseif other ~= "" then
+      answers[qt] = other
+    elseif #labels == 1 then
+      answers[qt] = labels[1]
+    elseif #labels == 0 then
+      return nil, "part " .. i .. " isn't answered"
+    else
+      return nil, "part " .. i .. " takes one answer"
+    end
+  end
+  return { nonce = nonce, answers = answers }
+end
+
+-- The panel's Send answers: picks JSON (the list above) for a question still held.
+function M.askAnswerFromPanel(item, text, now)
+  if not M.askHeld(item, now) then return nil, "that question isn't waiting in Shepherd any more" end
+  local ok, picks = pcall(M.json.decode, tostring(text or ""))
+  if not ok or type(picks) ~= "table" then return nil, "unreadable answer" end
+  return M.askAnswerPayload(item.pending.ask, picks, item.ask_nonce)
+end
+
+-- What the card and the Instances row show for a held question. simple = one single-choice
+-- question, so a click on an option answers it outright.
+function M.askView(item)
+  local ask = type(item) == "table" and type(item.pending) == "table" and item.pending.ask
+  if type(ask) ~= "table" or type(ask[1]) ~= "table" then return nil end
+  local q, opts = ask[1], {}
+  for _, o in ipairs(type(q.options) == "table" and q.options or {}) do
+    if type(o) == "table" and type(o.label) == "string" then opts[#opts + 1] = o.label end
+  end
+  return { question = M.capChars(tostring(q.question or ""), 200), header = type(q.header) == "string" and q.header or nil,
+           options = opts, count = #ask, simple = (#ask == 1 and q.multiSelect ~= true and #opts > 0) }
 end
 
 -- Valid effort levels that can be set live via `/effort` (matches settings).
@@ -1261,6 +1357,7 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
       editor = it.editor, pendingSummary = (it.status == "approval") and ps or nil,
       bgActive = it.bg_active and true or nil,
       tabless = it.tabless and true or nil,
+      ask = it.askHeld and it.askView or nil,   -- a question held for Adam (cc-ask.sh), answered on the row
       -- ready to merge: just what the row shows (the review lives in the detail panel)
       merge = (type(it.merge) == "table") and { phase = it.merge.phase, line = it.merge.line,
         needsYou = it.merge.needsYou, ready = it.merge.ready, queued = it.merge.queued, sent = it.merge.sent } or nil,
@@ -2118,6 +2215,7 @@ function M.selectActionable(list, action, opts)
   if not rule then return out end
   for _, it in ipairs(list or {}) do
     if it.key and not it.stale
+       and not ((action == "approve" or action == "deny") and it.askHeld)   -- answered with its own buttons
        and M.remoteActionAllowed(it, action, opts) then  -- remote tiles: headless approve/deny only
       local ok
       if rule.match ~= nil then ok = (it.status == rule.match)
@@ -2139,9 +2237,10 @@ end
 -- the hazard the shared tail exists to prevent. Same for the "answer" fallback
 -- when key synthesis can't drive the picker (multi-select / multi-question:
 -- handleAction jumps via fx.focusWindow instead of sending keys).
-function M.actionIsHeadless(item, action)
+function M.actionIsHeadless(item, action, now)
   if not item then return false end
   if item.remote then return true end  -- bridge tiles never focus a local window
+  if action == "answer" and M.askHeld(item, now) then return true end   -- cc-ask.sh: a file, no window
   if item.editor == "kitty" then
     if action == "focus" then return false end
     if action == "answer" and (M.askIsMulti(item) or M.askIsMultiQuestion(item)) then return false end
@@ -5723,7 +5822,7 @@ end
 -- user hook whose basename ENDS in one of these (e.g. my-cc-status.sh) is a false
 -- positive, acceptable next to the old bare-"cc-" net. KEEP IN SYNC with install.sh's
 -- jq `any(test("cc-(status|approve|popup)\\.sh"))`.
-M.OUR_HOOK_SCRIPTS = { "cc-status.sh", "cc-approve.sh", "cc-popup.sh" }
+M.OUR_HOOK_SCRIPTS = { "cc-status.sh", "cc-approve.sh", "cc-popup.sh", "cc-ask.sh" }
 function M.mergeHooks(existing, template)
   existing = type(existing) == "table" and existing or {}
   local out = {}
@@ -11511,6 +11610,9 @@ M.FEATURES = {
   { key = "fleet", cat = "Control", new = true, title = "Claude drives a batch",
     what = "A Claude session proposes a batch of worktree units; you approve it once on its card (and choose whether it may merge them when green). It then opens each unit's tab through Shepherd and hands it its task. Stop batch ends it.",
     why = "Parallel work without opening tabs, pressing Return or clicking every merge -- your one approval is the permission." },
+  { key = "answers", cat = "Control", new = true, title = "Answer questions from Shepherd",
+    what = "When a session asks you something, its card pulses with the question and you get one alert; its answers are buttons right there (and on its Instances row). Your click goes straight to the session -- no tab to find. Several parts or free text: pick per part, then Send answers. Answer in the tab instead hands it back to the tab.",
+    why = "A session waiting on you shouldn't wait for you to find its tab -- and you always know when one is." },
   { key = "transcript", cat = "Control", new = true, title = "Transcript peek",
     what = "Read a session's recent back-and-forth, with a search box, right inside the panel.",
     why = "Triage what a session is actually doing in a glance instead of switching windows." },
