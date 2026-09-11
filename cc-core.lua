@@ -909,6 +909,9 @@ function M.firstPromptFromTranscript(head)
           end
         end
         text = text and text:gsub("^%s+", ""):gsub("%s+$", "") or nil
+        -- 2026-09-11: a tab that starts with a slash command is named after it ("/clear")
+        local cmd = text and text:match("^<command%-name>%s*(/[^<]-)%s*</command%-name>")
+        if cmd and cmd ~= "" then return cmd end
         if text and text ~= "" and text:sub(1, 1) ~= "<" then return text end
       end
     end

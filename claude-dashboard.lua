@@ -2611,7 +2611,15 @@ function FX.sessionTabLabel(it)
     local q = "'" .. path:gsub("'", "'\\''") .. "'"
     custom = hs.execute("grep -F '\"type\":\"custom-title\"' " .. q .. " 2>/dev/null | tail -n 3")
   end)
-  return core.claudeTabLabel(core.claudeTabTitle(custom, FX.readTail(path, 131072)))
+  local title = core.claudeTabTitle(custom, FX.readTail(path, 131072))
+  if not title then
+    -- 2026-09-11: no custom or AI title yet -> the extension names the tab after the first
+    -- prompt (a slash command counts: "/clear"), so that's the tab's name too
+    local head
+    pcall(function() local f = io.open(path, "rb"); if f then head = f:read(16384); f:close() end end)
+    title = core.firstPromptFromTranscript(head)
+  end
+  return core.claudeTabLabel(title)
 end
 
 -- Ask the bridge in this session's window to close its tab. true = the command went out
@@ -2638,7 +2646,16 @@ function FX.closeTab(it, opts)
   local unit = FX.fleetUnitTagOf(it)
   local label = unit and ("unit " .. unit) or FX.sessionTabLabel(it)
   local ok, why
-  if unit then ok, why = core.tabBridgeUnitVerdict(FX.tabBridgeRegistry(hw), unit, FX.now())
+  if unit then
+    ok, why = core.tabBridgeUnitVerdict(FX.tabBridgeRegistry(hw), unit, FX.now())
+    -- 2026-09-11: no tab carries the tag (a window reload, or a tab Shepherd didn't open):
+    -- fall back to the tab's name, still only on a single match
+    if not ok then
+      local byName = FX.sessionTabLabel(it)
+      local nok, nwhy = core.tabBridgeCloseVerdict(FX.tabBridgeRegistry(hw), byName, FX.now())
+      if nok then unit, label, ok, why = nil, byName, true, nil
+      else why = why .. "; and by name: " .. tostring(nwhy) end
+    end
   else ok, why = core.tabBridgeCloseVerdict(FX.tabBridgeRegistry(hw), label, FX.now()) end
   if not ok then return refuse(why) end
   local cmd = core.tabBridgeCommand(it.key, label, FX.now(), "close", unit)

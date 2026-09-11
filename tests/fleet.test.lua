@@ -217,6 +217,22 @@ check("a unit's nameless tab is closed by its tag, not by a name  (unit=" .. tos
       sentClose == true and cl and cl.unit == "b1:alpha" and cl.label == nil)
 os.execute('rm -f "' .. BR .. '/701.in/"*')
 
+-- 2026-09-11 live: no tab carried the unit's tag (it was a restored tab, named "/clear" after its
+-- first command), and Shepherd gave up without trying the name -- a red card with nothing to press.
+write(T .. "/ua.jsonl", '{"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>x</local-command-caveat>"}}\n'
+  .. '{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>"}}\n')
+status("ua", "/r/A/.claude/worktrees/alpha", "5001", { transcript_path = T .. "/ua.jsonl" })
+write(BR .. "/701.json", json.encode({ v = 1, pid = 701, version = "0.3.0", folders = { "/r/A" }, at = os.time(),
+  tabs = { { label = "/clear" }, { label = "Claude Code" }, { label = "Claude Code" } } }))
+tick()
+ua = items().ua
+local sentByName = ua and select(2, quiet(function() return fx.closeTab(ua, { quiet = true }) end))
+cl = nil
+for _, c in ipairs(inboxCmds()) do if c.op == "close" then cl = c end end
+check("no tab tagged for the unit: Close falls back to the tab's name, when it's the only one  (label=" .. tostring(cl and cl.label) .. ")",
+      sentByName == true and cl and cl.label == "/clear" and cl.unit == nil)
+os.execute('rm -f "' .. BR .. '/701.in/"*')
+
 -- 2026-09-11 live: the unit's tab never opened ("window wasn't in front"), yet a new session in the
 -- repo was recorded as the unit's. A tab that didn't open answers the driver with why.
 write(FD .. "/b1.tab-beta.json", json.encode({ v = 1, batch = "b1", slug = "beta", session_id = "drv", nonce = "t-beta0", at = os.time() }))
