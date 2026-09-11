@@ -136,6 +136,26 @@ surface). Shepherd can't tell a sidebar session from an editor tab, so a Jump wo
 live session; instead you pick the tab (its title is the chat title). Revisit if the extension ever
 refuses to resume a session live elsewhere. **[DECISION D-14]**
 
+Closing **one** tab needs something inside VS Code: nothing outside can target a tab (⌘W hits
+the front one; the Claude extension's URI has no close; VS Code's Accessibility tree is off). So a
+tiny local companion extension, the **tab bridge** (`vscode-bridge/`), runs in every window's
+extension host — the same process as that window's Claude tabs, so its pid *is* `host_window` —
+lists the window's Claude tabs by name, and takes exactly one command: close a Claude tab by name.
+The tab API exposes no session id, so the name is the identity: Shepherd computes it as the Claude
+extension does (custom title, else AI title, cut to 24 UTF-16 units + "…"), and the bridge closes
+only on a **single** match — a fresh "Claude Code" tab, or two tabs sharing a name, stay refused.
+It is installed locally with VS Code's own CLI, never published. **[DECISION D-15]**
+
+**Ready to merge** is its own channel, not the approval gate: the gate's status values, its
+`allow|deny <nonce>` answers and its 120 s hook wait can't carry a review or wait an hour. A
+worktree tab runs `cc-merge.sh request` in the **background** (Claude Code wakes the session when
+it exits), which writes `~/.claude/cc-merge/<key>.json`; Shepherd checks it with **its own git**,
+reviews it on the card, and answers with a decision file bound to the request's nonce, claimed with
+`mv` like the gate's. Approving means "go": the **session** that did the work rebases, settles
+conflicts with the tests, fast-forwards main and runs `cc-merge.sh done` (which removes the
+worktree and branch only once the branch is in main, never forced) — one merge per repo at a time,
+in click order. Shepherd re-verifies with git before the tab bridge closes the tab. **[DECISION D-16]**
+
 ## 6. Observability (local, derived, zero extra hooks)
 
 All from the transcript Shepherd already tails — **no extra hooks, no model tokens**:

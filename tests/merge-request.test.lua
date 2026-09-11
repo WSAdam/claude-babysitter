@@ -32,12 +32,14 @@ local S = {
   { "c1", "/r/C", "fix/c1" }, { "d1", "/r/D", "fix/d1" },
 }
 local FACTS = {}
+local VERIFY_OUT = "@@in\n@@list\nworktree /r/A\nHEAD a\nbranch refs/heads/main\n"   -- the merged worktree is gone
 for i, s in ipairs(S) do
   local key, repo, branch = s[1], s[2], s[3]
   local wt = repo .. "/.claude/worktrees/" .. key
   write(T .. "/status/" .. key .. ".json", string.format(
-    '{"status":"done","session_id":"%s","name":"%s","cwd":"%s","since":%d,"updated":%d,"editor":"vscode","host_window":"%d","session_pid":"%d"}',
-    key, key, wt, now, now, 700 + i, 900 + i))
+    '{"status":"done","session_id":"%s","name":"%s","cwd":"%s","since":%d,"updated":%d,"editor":"vscode","host_window":"%d","session_pid":"%d","transcript_path":"%s"}',
+    key, key, wt, now - 60, now - 60, 700 + i, 900 + i, T .. "/" .. key .. ".jsonl"))
+  write(T .. "/" .. key .. ".jsonl", '{"type":"ai-title","aiTitle":"Fix ' .. key .. ' tab","sessionId":"' .. key .. '"}\n')
   write(MD .. "/" .. key .. ".json", json.encode({ v = 1, key = key, session_id = key, pid = tostring(900 + i),
     nonce = "n-" .. key, worktree = wt, branch = branch, base = "main", commonDir = repo .. "/.git",
     summary = "Unit " .. key .. " <b>bold</b>", tests = "make test: green", ahead = 1, at = now, phase = "requested" }))
@@ -83,6 +85,7 @@ local hs = {
   execute = function(cmd)
     cmd = tostring(cmd or "")
     if cmd:find("@@listed", 1, true) then return FACTS[cmd:match("%-C '([^']+)'") or ""] or "" end
+    if cmd:find("merge-base --is-ancestor", 1, true) then return VERIFY_OUT end
     if cmd:find("diff --no-color", 1, true) then return "diff --git a/app.txt b/app.txt\n+<script>x</script>\n" end
     return ""
   end,
@@ -180,7 +183,46 @@ setPhase("a1", "merged", { sha = "abc1234def" })
 tick()
 check("a1 merged -> a2 starts, on its own nonce", decision("a2") and decision("a2").nonce == "n-a2")
 I = items()
-check("a1's card says merged  (" .. tostring(I.a1.merge.line) .. ")", I.a1.merge.line == "✓ merged fix/a1 into main")
+-- (no tab bridge in a1's window yet, so the card also says to close the tab by hand)
+check("a1's card says merged  (" .. tostring(I.a1.merge.line) .. ")", I.a1.merge.line:sub(1, #"✓ merged fix/a1 into main") == "✓ merged fix/a1 into main")
+check("...and, with no tab bridge in its window, to close the tab by hand", I.a1.merge.line:find("isn't running", 1, true) ~= nil)
+
+-- ---- after a verified merge, the tab bridge closes that session's tab (2026-09-11) ----
+local BR = T .. "/.claude/cc-bridge"
+local function registry(host, labels)
+  os.execute('mkdir -p "' .. BR .. '/' .. host .. '.in" "' .. BR .. '/' .. host .. '.out"')
+  local tabs = {}
+  for _, l in ipairs(labels) do tabs[#tabs + 1] = { label = l, group = 1, active = false } end
+  write(BR .. "/" .. host .. ".json", json.encode({ v = 1, pid = host, version = "0.1.0", tabs = tabs, at = os.time() }))
+end
+local function inbox(host)
+  local out, p = {}, io.popen('ls -1 "' .. BR .. '/' .. host .. '.in" 2>/dev/null')
+  if p then for l in p:lines() do out[#out + 1] = l end; p:close() end
+  return out
+end
+registry(701, { "Fix a1 tab", "Fix a2 tab" })
+registry(703, { "Fix b1 tab" })
+setPhase("a1", "merged", { sha = "abc1234def" })
+tick()
+local sent = inbox(701)
+local cmd = sent[1] and json.decode(read(BR .. "/701.in/" .. sent[1])) or {}
+check("a verified merge whose session finished its turn: the bridge is asked to close its tab  (" .. tostring(cmd.label) .. ")",
+      #sent == 1 and cmd.op == "close" and cmd.label == "Fix a1 tab")
+tick()
+check("...once, not every tick", #inbox(701) == 1)
+write(BR .. "/701.out/" .. tostring(cmd.id) .. ".json", json.encode({ v = 1, id = cmd.id, ok = true }))
+quiet(function() fx.tabBridgePollResults() end)
+check("once the tab is closed, the card and its merge request go", read(T .. "/status/a1.json") == nil and read(MD .. "/a1.json") == nil)
+
+-- merged, but Shepherd's git still sees the worktree: no close, the card says why
+VERIFY_OUT = VERIFY_OUT .. "\nworktree /r/B/.claude/worktrees/b1\nHEAD b\nbranch refs/heads/fix/b1\n"
+os.remove(MD .. "/b1.decision")
+setPhase("b1", "merged", { sha = "abc1234def" })
+tick()
+I = items()
+check("a merge Shepherd can't verify never closes the tab", #inbox(703) == 0)
+check("...and the card says to close it by hand, and why  (" .. tostring(I.b1 and I.b1.merge and I.b1.merge.line) .. ")",
+      I.b1 and I.b1.merge and I.b1.merge.line:find("still there", 1, true) ~= nil)
 
 -- Not yet, with a note
 quiet(function() fx.mergeHold("c1", "rename the helper first") end)

@@ -4,6 +4,21 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — A merged unit's tab closes itself
+
+### Added — close the tab after a verified merge
+
+When a tab reports `cc-merge.sh done --result merged`, Shepherd re-checks with its own git that
+the merged commit is in the base and the worktree is gone, waits until the session's last turn has
+ended (finished or idle a few seconds, no background agents), and asks the tab bridge in that
+window to close the session's tab — once. A refused close (no bridge yet, an ambiguous tab name, a
+terminal session) is retried when that window's bridge reports again, and the card says *merged —
+close its tab yourself* with the reason; an unverified merge never closes anything.
+`merge.closeTab` switches it off. Fixtures: `tests/core.test.lua` (the verify command and
+verdict, when a close is due, the card line) and `tests/merge-request.test.lua` (one close command
+for a verified merge, the card goes on the bridge's confirmation, an unverified merge keeps its
+tab).
+
 ## 2026-09-11 — Ready to merge
 
 ### Added — a worktree tab asks for a merge; you review and approve it in Shepherd

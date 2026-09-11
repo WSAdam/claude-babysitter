@@ -211,6 +211,11 @@ instead of merging on its own: it runs `~/.claude/cc-merge.sh request --summary 
   worktree and the branch — never forced. Merges in one repo run **one at a time, in the order you
   clicked**; the rest show *queued (next in line)* and start on their own. **Not yet** sends your
   note back, and the unit stays in its worktree.
+- **The tab closes itself.** Once `done` reports the merge, Shepherd checks with its own git that
+  the merged commit is in main and the worktree is gone, waits for the session's last turn to end,
+  and has the tab bridge close that tab. If it can't (no bridge in that window, a tab name shared
+  by two tabs, a terminal session) or git disagrees, the card says *merged — close its tab
+  yourself* and why. `"merge": { "closeTab": false }` leaves every tab open.
 - No keystrokes: the request and your answer are files in `~/.claude/cc-merge/`, and the answer is
   bound to the request it's for. `"merge": { "enabled": false }` makes Shepherd ignore requests.
 

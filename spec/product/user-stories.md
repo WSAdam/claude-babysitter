@@ -41,6 +41,12 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want a Claude tab that moved into its own worktree to show that worktree's branch on the project card and in Instances, so that I can tell my tabs apart and never reopen a worktree a tab is already working in.
 - As a **developer**, I want a New worktree tab button that opens a Claude tab in the repo's window with the prompt to enter a named worktree already typed in, so that starting a parallel unit takes one form and one Return instead of a manual setup.
 - As a **developer**, I want Open on an idle worktree under .claude/worktrees/ to resume it in a new tab of the repo's window, so that a parked unit comes back where the rest of the project's tabs live.
+- As a **fleet operator**, I want Close on a session that shares its VS Code window to close just that session's Claude tab, so that I can clean up a finished tab without a keystroke that might hit the wrong one.
+- As a **developer**, I want a worktree tab that finished its unit to ask me to merge instead of merging on its own, so that nothing reaches main without my say.
+- As a **fleet operator**, I want a ready-to-merge card with a review — commits, changed files, the full diff, the session's summary and test claim — checked by Shepherd's own git, so that I can approve a merge from the panel with confidence.
+- As a **fleet operator**, I want merges I approve in one repo to run one at a time in the order I clicked, so that parallel units never race each other into main.
+- As a **developer**, I want Not yet to send my note back to the waiting tab, so that it can fix what I saw before asking again.
+- As a **fleet operator**, I want a merged unit's tab to close by itself once Shepherd has confirmed the merge, so that finished tabs don't pile up in the window.
 
 ## Session observability
 

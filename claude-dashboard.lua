@@ -2596,15 +2596,19 @@ end
 
 -- Ask the bridge in this session's window to close its tab. true = the command went out
 -- (the card goes when the bridge confirms, in FX.tabBridgePollResults); false = refused
--- before anything was sent, with an alert saying why.
-function FX.closeTab(it)
-  if type(it) ~= "table" or it.remote or it.editor == "kitty" then return false end
+-- before anything was sent, with an alert saying why (opts.quiet: no alert -- the caller
+-- shows the reason, returned second, its own way).
+function FX.closeTab(it, opts)
+  if type(it) ~= "table" or it.remote then return false, "it isn't a local session" end
+  if it.editor == "kitty" or it.editor == "terminal" then return false, "it runs in a terminal, not a VS Code tab" end
   local name = tostring(it.label or it.name or "?")
   local function refuse(why)
-    FX._closeTabWhy[tostring(it.key)] = why
+    if not (opts and opts.quiet) then
+      FX._closeTabWhy[tostring(it.key)] = why
+      pcall(function() hs.alert.show("Can't close " .. name .. "'s tab: " .. why) end)
+    end
     print("[cc-dashboard] ⚠️ Close NOT sent for '" .. name .. "': " .. why)
-    pcall(function() hs.alert.show("Can't close " .. name .. "'s tab: " .. why) end)
-    return false
+    return false, why
   end
   if core.config(loadConfig(), "tabBridge.enabled", true) == false then
     return refuse("the Shepherd tab bridge is switched off (tabBridge.enabled)")
@@ -2765,6 +2769,39 @@ function FX.mergeDiff(key)
   pcall(function() wv:evaluateJavaScript("window.ccMergeDiff(" .. js .. ")") end)
 end
 
+-- After a merge: close the session's tab through the tab bridge -- only once Shepherd's own
+-- git confirms it (commit in the base, worktree gone) and the session's last turn is over.
+-- Returns a note for the card when Adam has to close the tab himself. A refused close is
+-- retried when that window's bridge reports again (its registry `at`), or after 30s.
+FX._mergeVerify = {}     -- nonce -> { at, ok, why }
+FX._mergeCloseTry = {}   -- nonce -> { at, regAt, why }
+FX._mergeClosing = {}    -- nonce -> true: the bridge has the close command
+function FX.mergeAutoClose(r, it)
+  if FX._mergeClosing[r.nonce] then return nil end
+  local now = FX.now()
+  local v = FX._mergeVerify[r.nonce]
+  if not v or now - v.at >= 10 then
+    local out
+    if r.sha then pcall(function() out = hs.execute(core.mergeVerifyCmd(r)) end) end
+    local ok, why = core.mergeVerified(r, out)
+    v = { at = now, ok = ok, why = why }
+    FX._mergeVerify[r.nonce] = v
+  end
+  if not v.ok then return "close its tab yourself once you've looked: " .. tostring(v.why) end
+  if not core.mergeCloseDue(it, now) then return nil end
+  local reg = FX.tabBridgeRegistry(it.host_window)
+  local t = FX._mergeCloseTry[r.nonce]
+  if t and now - t.at < 30 and (reg and reg.at) == t.regAt then return t.why end
+  local sent, why = FX.closeTab(it, { quiet = true })
+  if sent then
+    FX._mergeClosing[r.nonce] = true
+    FX._mergeCloseTry[r.nonce] = nil
+    return nil
+  end
+  FX._mergeCloseTry[r.nonce] = { at = now, regAt = reg and reg.at, why = "close its tab yourself: " .. tostring(why) }
+  return FX._mergeCloseTry[r.nonce].why
+end
+
 -- Tick: stamp it.merge on each live session with a request, run the queue, alert once per
 -- state that wants Adam. Requests whose session is gone are ignored (and never block a repo).
 function FX.annotateMerges(list, cfg, bannerOn)
@@ -2804,7 +2841,12 @@ function FX.annotateMerges(list, cfg, bannerOn)
       facts = FX.mergeFacts(r)
       rd = core.mergeReadiness(r, facts, it)
     end
-    it.merge = core.mergeView(r, rd, facts, { queued = q.queued[key], sent = FX._mergeSent[key] ~= nil })
+    local closeNote
+    if r.phase == "merged" and core.config(cfg, "merge.closeTab", true) ~= false then
+      closeNote = FX.mergeAutoClose(r, it)
+    end
+    it.merge = core.mergeView(r, rd, facts, { queued = q.queued[key], sent = FX._mergeSent[key] ~= nil,
+                                               closeNote = closeNote })
     if it.merge.needsYou and not (r.phase == "requested" and rd and rd.checking) then
       local tag = r.nonce .. "|" .. r.phase
       if not FX._mergeAlerted[tag] then

@@ -35,6 +35,9 @@ and the README's "Testing & development" section.
   main. TODO.md is gitignored, so a worktree's copy never blocks `git worktree remove`
   (`tests/worktree-hygiene.test.sh`); main's TODO.md is updated after `ExitWorktree`, since
   the fence blocks main from inside a worktree.
+- **Finishing a unit here** follows the global ready-to-merge protocol, with one extra step:
+  after the ff-merge and `make test` on main, run `make deploy` from main (the live copy must
+  be main) BEFORE `~/.claude/cc-merge.sh done --result merged`, then flip the unit's TODO lines.
 
 ## Traps that have bitten this repo
 
@@ -60,6 +63,16 @@ and the README's "Testing & development" section.
   `FX.closeTab` names the tab like the Claude extension does (`core.claudeTabLabel`) and the
   bridge closes it only on a single match. Never add a bridge op beyond close-by-name. Bump
   its `package.json` version with every change, or `make install` won't reinstall it.
+- The tab bridge's switch is `tabBridge.*`; plain `bridge.*` is the SSH remote bridge
+  (`FX.bridgeSync`). Keep the two apart in config keys, names and wording.
+- Ready to merge is its own channel (`cc-merge.sh`, `~/.claude/cc-merge/`), not the approval
+  gate: answers are JSON decision files bound to the request's nonce READ FROM DISK
+  (`FX.writeMergeDecision`), claimed with `mv` by the waiting script. Readiness and the
+  post-merge check use Shepherd's own git (`core.mergeFactsCmd`, `core.mergeVerifyCmd`), never
+  the session's word; the tab closes only after both. A new per-key merge file goes in BOTH
+  `cc_remove` and `FX.removeStatus`.
+- Scripts reach `~/.claude` by RENAME (`make install`, `install.sh`): bash reads a running
+  script lazily, so rewriting one in place garbles a hook that's mid-run.
 - `vscode://anthropic.claude-code/open?prompt=` opens a new Claude tab in the ACTIVE editor
   window, prompt typed in but never sent. Only `FX.openClaudeTab` sends it, after a positive
   window match re-checked right before the URI goes out; never follow it with a keystroke.

@@ -7904,7 +7904,8 @@ do
   -- 2026-08-31: 6 -> 7 when the worklist gained the TODO.md import (re-flagged new).
   -- 2026-09-10: 7 -> 8 for project cards & instances ("stacks", flagged new).
   -- 2026-09-10: 8 -> 9 for the shared-window keystroke guard ("sharedwin", flagged new).
-  eq("FEATURES: the 9 new features are flagged", newCount, 9)
+  -- 2026-09-11: 9 -> 10 for the ready-to-merge flow ("merge", flagged new).
+  eq("FEATURES: the 10 new features are flagged", newCount, 10)
 end
 
 -- F4: transcript peek (user + assistant rows, chronological, noise filtered)
@@ -8871,6 +8872,32 @@ do
   eq("tier: a merge request waiting for Adam needs you", tier(v), 1)
   eq("tier: ...a blocked merge too", tier(core.mergeView(bl, nil, nil, {})), 1)
   check("tier: a queued or running merge doesn't", tier(core.mergeView(r, ok, f, { queued = 1 })) ~= 1 and tier(core.mergeView(ap, nil, nil, {})) ~= 1)
+
+  -- after the merge: Shepherd re-checks with its own git, then closes the tab (U3)
+  local vcmd = core.mergeVerifyCmd(mg)
+  check("verify: asks git whether the merged commit is in the base, and lists worktrees",
+        vcmd:find("merge-base --is-ancestor abc1234def refs/heads/main", 1, true) and vcmd:find("worktree list --porcelain", 1, true)
+        and vcmd:find("--git-dir='/r/main/.git'", 1, true))
+  local gone = "@@in\n@@list\nworktree /r/main\nHEAD a\nbranch refs/heads/main\n"
+  local okv, whyv = core.mergeVerified(mg, gone)
+  check("verified: in main and the worktree is gone  (" .. tostring(whyv) .. ")", okv == true)
+  okv, whyv = core.mergeVerified(mg, "@@list\nworktree /r/main\n")
+  check("not verified: the commit isn't in main  (" .. tostring(whyv) .. ")", okv == false and whyv:find("isn't in main", 1, true))
+  okv, whyv = core.mergeVerified(mg, gone .. "\nworktree /r/main/.claude/worktrees/demo\nHEAD b\nbranch refs/heads/fix/demo\n")
+  check("not verified: the worktree is still there  (" .. tostring(whyv) .. ")", okv == false and whyv:find("still there", 1, true))
+  okv = core.mergeVerified(core.parseMergeRequest(reqJson({ phase = "merged" })), gone)
+  check("not verified: no merged commit recorded", okv == false)
+  check("verify: a sha that isn't hex never reaches the command",
+        core.parseMergeRequest(reqJson({ phase = "merged", sha = "abc; rm -rf /" })).sha == nil)
+
+  check("close due: the session finished its last turn a few seconds ago",
+        core.mergeCloseDue({ status = "done", since = 90 }, 100) == true)
+  check("close due: not while it's still working", core.mergeCloseDue({ status = "working", since = 10 }, 100) == false)
+  check("close due: not while background agents run", core.mergeCloseDue({ status = "done", since = 10, bg_active = true }, 100) == false)
+  check("close due: not in the first seconds after the turn ended", core.mergeCloseDue({ status = "idle", since = 99 }, 100) == false)
+  local mv = core.mergeView(mg, nil, nil, { closeNote = "close its tab yourself: 2 Claude tabs share its name" })
+  eq("card: merged, but the tab can't be closed for it",
+     core.mergeLine(mv), "✓ merged fix/demo into main -- close its tab yourself: 2 Claude tabs share its name")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

@@ -3166,7 +3166,7 @@ do
   check("tabbridge-pin: the example config has ONE top-level \"bridge\" (the SSH remote bridge)  (got=" .. n .. ")", n == 1)
   check("tabbridge-pin: the tab bridge's switch is tabBridge.enabled in the example config",
         ex:find('\n  "tabBridge": {', 1, true) ~= nil)
-  local closeTab = src:match("function FX%.closeTab%(it%).-\nend\n") or ""
+  local closeTab = src:match("function FX%.closeTab%(it[^)]*%).-\nend\n") or ""
   local doctor = src:match("function FX%.doctorStatus%(%).-\nend\n") or ""
   check("tabbridge-pin: Close-by-tab and Doctor read tabBridge.enabled, never the remote bridge's key",
         #closeTab > 0 and #doctor > 0

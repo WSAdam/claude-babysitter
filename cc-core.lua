@@ -1416,12 +1416,39 @@ function M.mergeQueue(reqs, approved, sent, now)
   return out
 end
 
--- Does this merge state want Adam? A request he hasn't answered, or one that came back blocked
--- or merged with leftovers.
+-- Does this merge state want Adam? A request he hasn't answered, one that came back blocked
+-- or merged with leftovers, or a merged unit whose tab he has to close himself.
 function M.mergeNeedsYou(v)
   if type(v) ~= "table" then return false end
   if v.phase == "requested" then return not v.queued and not v.sent end
+  if v.phase == "merged" then return v.closeNote ~= nil end
   return v.phase == "blocked" or v.phase == "merged-dirty"
+end
+
+-- After `done --result merged`: Shepherd re-checks with its own git before closing the tab --
+-- the merged commit is in the base, and the worktree is gone. The sha was validated as hex.
+function M.mergeVerifyCmd(req)
+  local G = "git --git-dir='" .. tostring(req.commonDir):gsub("'", "'\\''") .. "'"
+  return G .. " merge-base --is-ancestor " .. tostring(req.sha) .. " refs/heads/" .. req.base
+    .. " 2>/dev/null && echo @@in; echo @@list; " .. G .. " worktree list --porcelain 2>/dev/null"
+end
+
+function M.mergeVerified(req, out)
+  if type(req) ~= "table" or not req.sha then return false, "no merged commit was recorded" end
+  if type(out) ~= "string" then return false, "git didn't answer" end
+  if not out:find("@@in", 1, true) then return false, "the merged commit isn't in " .. req.base end
+  for _, e in ipairs(M.parseWorktreePorcelain(out:match("@@list\n(.*)$") or "")) do
+    if M.normDir(e.path) == req.worktree then return false, "the worktree is still there" end
+  end
+  return true
+end
+
+-- Close the tab only once the session's LAST turn is over (it reports `done` mid-turn, then
+-- sums up): finished or idle for a few seconds, no background agents running.
+function M.mergeCloseDue(item, now)
+  if type(item) ~= "table" or item.bg_active then return false end
+  if item.status ~= "done" and item.status ~= "idle" then return false end
+  return (tonumber(now) or 0) - (tonumber(item.since) or 0) >= 3
 end
 
 -- The card's one line for a merge state.
@@ -1437,7 +1464,8 @@ function M.mergeLine(v)
     if not v.ready then return "⇡ merge request: " .. tostring((v.problems or {})[1] or "not ready yet") end
     return "⇡ ready to merge " .. b .. " → " .. base
   elseif v.phase == "approved" then return "⇡ merging " .. b .. " into " .. base
-  elseif v.phase == "merged" then return "✓ merged " .. b .. " into " .. base
+  elseif v.phase == "merged" then
+    return "✓ merged " .. b .. " into " .. base .. (v.closeNote and (" -- " .. v.closeNote) or "")
   elseif v.phase == "merged-dirty" then return "✓ merged " .. b .. ", but " .. tostring(v.note or "something was left behind")
   elseif v.phase == "blocked" then
     return "⚠ merge blocked: " .. ((v.note and v.note ~= "") and v.note or "no reason given")
@@ -1453,6 +1481,7 @@ function M.mergeView(req, rd, facts, q)
     phase = req.phase, branch = req.branch, base = req.base, folder = req.worktree:match("([^/]+)/?$"),
     summary = req.summary, tests = req.tests, note = req.note, at = req.at,
     sha = req.sha and req.sha:sub(1, 7) or nil, queued = q.queued, sent = q.sent and true or nil,
+    closeNote = (req.phase == "merged") and q.closeNote or nil,
   }
   if req.phase == "requested" then
     v.ready = rd and rd.ready or false
@@ -11190,8 +11219,11 @@ M.FEATURES = {
     what = "Act on any session from its tile — focus its window, send it a message, stop it, or clear its context.",
     why = "Drive a session without switching to it." },
   { key = "sharedwin", cat = "Control", new = true, title = "Shared-window guard",
-    what = "When several Claude sessions run as tabs in one VS Code window, Shepherd won't type into any of them — no nudge, queue feed, /clear or close — and says why. Jump and hands-free approvals still work. keystrokes.refuseSharedWindow switches it off.",
+    what = "When several Claude sessions run as tabs in one VS Code window, Shepherd won't type into any of them — no nudge, queue feed or /clear — and says why. Close goes through the Shepherd tab bridge, which closes just that session's tab. Jump and hands-free approvals still work. keystrokes.refuseSharedWindow switches it off.",
     why = "Shepherd types into a window, not a tab, so a message meant for one tab could land in another." },
+  { key = "merge", cat = "Control", new = true, title = "Ready to merge",
+    what = "A worktree tab that finishes its unit asks for a merge; its card says so and the detail panel shows the review — commits, files, full diff, the session's summary and test claim. Merge lets it rebase, test and fast-forward main (one merge per repo at a time); afterwards Shepherd closes its tab. Not yet sends your note back.",
+    why = "Several tabs can work in parallel and you only approve the merges — no rebasing, merging, cleanup or tab-closing by hand." },
   { key = "transcript", cat = "Control", new = true, title = "Transcript peek",
     what = "Read a session's recent back-and-forth, with a search box, right inside the panel.",
     why = "Triage what a session is actually doing in a glance instead of switching windows." },
