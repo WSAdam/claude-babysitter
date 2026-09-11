@@ -2667,14 +2667,27 @@ end
 -- be the Claude sidebar -- but the card says so and offers End session.
 FX.TABLESS_AFTER = 20
 FX._tablessSince = {}
-FX._tabLabels = {}   -- key -> { label, at }: a transcript grep + tail at most every 30s
+FX._tabLabels = {}   -- key -> { names, at }: a transcript grep + head + tail at most every 30s
 
-function FX.cachedTabLabel(it)
+-- Every name this session's tab could be showing (custom title, AI title, first prompt, last
+-- prompt -- core.claudeTabCandidates). nil when there's no transcript to read.
+function FX.cachedTabCandidates(it)
   local c, now = FX._tabLabels[it.key], FX.now()
-  if c and now - c.at < 30 then return c.label end
-  local label = FX.sessionTabLabel(it)
-  FX._tabLabels[it.key] = { label = label, at = now }
-  return label
+  if c and now - c.at < 30 then return c.names end
+  local path, names = it.transcript_path, nil
+  if type(path) == "string" and path ~= "" then
+    local custom, head
+    pcall(function()
+      local q = "'" .. path:gsub("'", "'\\''") .. "'"
+      custom = hs.execute("grep -F '\"type\":\"custom-title\"' " .. q .. " 2>/dev/null | tail -n 3")
+    end)
+    pcall(function() local f = io.open(path, "rb"); if f then head = f:read(16384); f:close() end end)
+    names = core.claudeTabCandidates({
+      custom = core.claudeTabTitle(custom, nil), ai = core.aiTitleFromTranscript(FX.readTail(path, 131072)),
+      first = core.firstPromptFromTranscript(head), last = it.last_prompt })
+  end
+  FX._tabLabels[it.key] = { names = names, at = now }
+  return names
 end
 
 function FX.annotateTabless(list, cfg)
@@ -2688,7 +2701,7 @@ function FX.annotateTabless(list, cfg)
   for hw, r in pairs(regs) do if r == false then regs[hw] = nil end end
   if next(regs) == nil then return end
   for _, it in ipairs(list or {}) do
-    if it.host_window and regs[tostring(it.host_window)] then labels[it.key] = FX.cachedTabLabel(it) end
+    if it.host_window and regs[tostring(it.host_window)] then labels[it.key] = FX.cachedTabCandidates(it) end
   end
   local now, raw, live = FX.now(), core.tablessKeys(list, regs, labels, FX.now()), {}
   for _, it in ipairs(list or {}) do

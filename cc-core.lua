@@ -713,22 +713,84 @@ end
 -- running with no tab. In a window whose tab bridge is reporting, a local VS Code session
 -- whose tab name is known and matches none of the window's Claude tabs is tab-less.
 -- Nameless sessions, stale or missing registries, kitty/terminal/remote are never judged.
--- `labels` = key -> the session's tab label (core.claudeTabLabel) or nil. key -> true.
+-- `labels` = key -> every name the session's tab could show (core.claudeTabCandidates; a plain
+-- string is one name), or nil when unknown. Returns key -> true.
+-- 2026-09-11: a tab can show its first prompt instead of its AI title, so names alone flagged a
+-- real tab (wgsUltra). Structural rule on top: a window can only have tab-less sessions when it
+-- has MORE sessions than Claude tabs, and only the unmatched sessions that are exactly that
+-- surplus are marked. An unnamed session makes its window unjudgeable.
 function M.tablessKeys(list, registries, labels, now)
-  local out = {}
+  local out, byHost = {}, {}
   for _, it in ipairs(list or {}) do
     local hw = type(it) == "table" and it.host_window and tostring(it.host_window) or ""
     local reg = hw ~= "" and type(registries) == "table" and registries[hw] or nil
-    local label = type(labels) == "table" and labels[it.key] or nil
     if not it.remote and it.editor ~= "kitty" and it.editor ~= "terminal"
        and type(reg) == "table" and type(reg.tabs) == "table"
-       and (tonumber(now) or 0) - (tonumber(reg.at) or 0) <= M.TAB_BRIDGE_FRESH
-       and type(label) == "string" and label ~= "" then
-      local found = false
-      for _, t in ipairs(reg.tabs) do if type(t) == "table" and t.label == label then found = true end end
-      if not found then out[it.key] = true end
+       and (tonumber(now) or 0) - (tonumber(reg.at) or 0) <= M.TAB_BRIDGE_FRESH then
+      byHost[hw] = byHost[hw] or { reg = reg, members = {} }
+      table.insert(byHost[hw].members, it)
     end
   end
+  for _, w in pairs(byHost) do
+    local tabs, ntabs = {}, 0
+    for _, t in ipairs(w.reg.tabs) do
+      if type(t) == "table" and type(t.label) == "string" then tabs[t.label] = true; ntabs = ntabs + 1 end
+    end
+    local surplus = #w.members - ntabs
+    if surplus > 0 then
+      local unmatched, unknown = {}, false
+      for _, it in ipairs(w.members) do
+        local names = type(labels) == "table" and labels[it.key] or nil
+        if type(names) == "string" then names = { names } end
+        if type(names) ~= "table" or #names == 0 then
+          unknown = true
+        else
+          local hit = false
+          for _, n in ipairs(names) do if tabs[n] then hit = true end end
+          if not hit then unmatched[#unmatched + 1] = it.key end
+        end
+      end
+      if not unknown and #unmatched == surplus then
+        for _, k in ipairs(unmatched) do out[k] = true end
+      end
+    end
+  end
+  return out
+end
+
+-- The first real user prompt in a transcript head (meta records and slash-command wrappers
+-- skipped), trimmed; nil when there's none. A fresh tab is named after it until its AI title lands.
+function M.firstPromptFromTranscript(head)
+  if type(head) ~= "string" then return nil end
+  for line in (head .. "\n"):gmatch("([^\n]*)\n") do
+    if line:find('"type":"user"', 1, true) then
+      local ok, e = pcall(function() return M.json.decode(line) end)
+      if ok and type(e) == "table" and e.type == "user" and not e.isMeta and type(e.message) == "table" then
+        local c, text = e.message.content, nil
+        if type(c) == "string" then text = c
+        elseif type(c) == "table" then
+          for _, part in ipairs(c) do
+            if type(part) == "table" and part.type == "text" and type(part.text) == "string" then text = part.text; break end
+          end
+        end
+        text = text and text:gsub("^%s+", ""):gsub("%s+$", "") or nil
+        if text and text ~= "" and text:sub(1, 1) ~= "<" then return text end
+      end
+    end
+  end
+  return nil
+end
+
+-- Every name a session's tab could show, cut like the tab cuts them, in preference order:
+-- custom title, AI title, first prompt, last prompt. No prompt at all -> the fresh tab's name.
+function M.claudeTabCandidates(src)
+  src = type(src) == "table" and src or {}
+  local out, seen = {}, {}
+  for _, k in ipairs({ "custom", "ai", "first", "last" }) do
+    local l = M.claudeTabLabel(src[k])
+    if l and not seen[l] then seen[l] = true; out[#out + 1] = l end
+  end
+  if #out == 0 then out[1] = "Claude Code" end
   return out
 end
 

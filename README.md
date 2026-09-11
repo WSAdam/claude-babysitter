@@ -249,9 +249,10 @@ extension's URI was tried and dropped: for a session in the Claude sidebar it wo
 Claude process on the same session — see decision D-14 in `spec/product/spec.md`.)
 
 **Sessions with no tab.** Starting a new conversation in a Claude tab can leave the old
-session's `claude` process running with no tab of its own. Where the tab bridge runs, Shepherd
-compares each session's name with its window's Claude tabs; a session that has matched none of
-them for 20 seconds is marked **⊘ no tab — a leftover process, or the Claude sidebar** on its card,
+session's `claude` process running with no tab of its own. Where the tab bridge runs and a window
+has **more Claude sessions than Claude tabs**, Shepherd compares every name each session's tab
+could show (custom title, AI title, first or last prompt) with the window's tabs; when the sessions
+that match no tab are exactly that surplus and have stayed so for 20 seconds, they're marked **⊘ no tab — a leftover process, or the Claude sidebar** on its card,
 in Instances and in the detail panel, with **End session**. End asks first, checks with `ps` that
 the pid is still a `claude` process of that window, stops it and drops the card; the chat stays in
 its transcript. It's never offered for a session that has a tab. Until it's ended, a tab-less

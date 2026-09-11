@@ -8773,13 +8773,16 @@ do
     for k, v in pairs(extra or {}) do t[k] = v end
     return t
   end
-  local list = { vs("6698", "1051"), vs("957b", "1051"), vs("lone", "2000"), vs("nolabel", "1051"),
+  -- (2026-09-11 requirement change: "nolabel" moved to its own window -- an unnamed session now
+  -- makes its whole window unjudgeable, see the surplus rule below)
+  local list = { vs("6698", "1051"), vs("957b", "1051"), vs("lone", "2000"), vs("nolabel", "5000"),
                  vs("stale", "3000"), vs("k", "1051", { editor = "kitty" }), vs("r", "1051", { remote = { host = "x" } }),
                  vs("t", "1051", { editor = "terminal" }), vs("nobridge", "4000") }
   local regs = {
     ["1051"] = { at = 995, tabs = { { label = "Chargeback Sentinel hand…" } } },
     ["2000"] = { at = 995, tabs = {} },                                  -- its only tab was closed
     ["3000"] = { at = 100, tabs = {} },                                  -- a bridge that stopped reporting
+    ["5000"] = { at = 995, tabs = {} },
   }
   local labels = { ["6698"] = "Chargeback Sentinel hand…", ["957b"] = "Nexio rematch run 2026-…",
                    lone = "Old chat", stale = "Anything", k = "x", r = "x", t = "x", nobridge = "x" }
@@ -8791,6 +8794,41 @@ do
   check("tab-less: a stale bridge registry judges nothing", not tl.stale)
   check("tab-less: no bridge in the window judges nothing", not tl.nobridge)
   check("tab-less: kitty, terminal and remote sessions are never judged", not tl.k and not tl.t and not tl.r)
+
+  -- 2026-09-11: wgsUltra's tab showed its first prompt ("from your printed guide …") while its
+  -- transcript's AI title was "Project onboarding" -- so the AI title alone flagged a real, open
+  -- tab as tab-less (with End session on it). A tab can show several names, and a window can't
+  -- have a tab-less session unless it has more sessions than Claude tabs.
+  local wg = { vs("wg", "1052") }
+  local wgRegs = { ["1052"] = { at = 995, tabs = { { label = "from your printed guide …" } } } }
+  check("tab-less: the real case -- one session, one tab, different names: never tab-less",
+        not core.tablessKeys(wg, wgRegs, { wg = { "Project onboarding" } }, now).wg)
+  check("tab-less: ...with the name given as a plain string too (how the live panel first called it)",
+        not core.tablessKeys(wg, wgRegs, { wg = "Project onboarding" }, now).wg)
+  local two = { vs("a", "1053"), vs("b", "1053") }
+  local oneTab = { ["1053"] = { at = 995, tabs = { { label = "Something else" } } } }
+  local amb = core.tablessKeys(two, oneTab, { a = { "Alpha" }, b = { "Beta" } }, now)
+  check("tab-less: one surplus session but two unmatched -- can't tell which, marks none", not amb.a and not amb.b)
+  local cand = core.tablessKeys(two, { ["1053"] = { at = 995, tabs = { { label = "from your printed guide …" } } } },
+                                { a = { "Project onboarding", "from your printed guide …" }, b = { "Old chat" } }, now)
+  check("tab-less: any of a session's names matching its tab counts (first prompt here)", not cand.a and cand.b == true)
+  local unknown = core.tablessKeys(two, oneTab, { a = { "Alpha" } }, now)
+  check("tab-less: an unnamed session in the window makes it unjudgeable", not unknown.a and not unknown.b)
+
+  local head = '{"type":"summary","summary":"x"}\n'
+    .. '{"type":"user","isMeta":true,"message":{"role":"user","content":"<command-name>/clear</command-name>"}}\n'
+    .. '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"  from your printed guide show me the onboarding  "}]}}\n'
+    .. '{"type":"user","message":{"role":"user","content":"second prompt"}}\n'
+  eq("first prompt: the first real user message, trimmed (meta and command wrappers skipped)",
+     core.firstPromptFromTranscript(head), "from your printed guide show me the onboarding")
+  eq("first prompt: plain string content works too",
+     core.firstPromptFromTranscript('{"type":"user","message":{"role":"user","content":"hello there"}}\n'), "hello there")
+  eq("first prompt: none", core.firstPromptFromTranscript('{"type":"summary"}\n'), nil)
+  local names = core.claudeTabCandidates({ custom = nil, ai = "Project onboarding", first = "from your printed guide show me the onboarding", last = "go" })
+  check("tab names: every name the tab could show, cut like the tab cuts them",
+        #names == 3 and names[1] == "Project onboarding" and names[2] == "from your printed guide …" and names[3] == "go")
+  local fresh = core.claudeTabCandidates({})
+  check("tab names: a session with no prompt at all shows the fresh tab's name", #fresh == 1 and fresh[1] == "Claude Code")
 
   local ps = "1051 /Users/adam/.vscode/extensions/anthropic.claude-code-2.1.268-darwin-arm64/resources/native-binary/claude --output-format stream-json"
   local it = vs("957b", "1051", { tabless = true, session_pid = "2713" })

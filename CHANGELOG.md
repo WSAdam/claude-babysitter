@@ -4,6 +4,20 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — A tab showing its first prompt is not "no tab"
+
+### Fixed — the tab-less marker flagged a real, open tab
+
+Minutes after shipping, wgsUltra's one open tab was about to be marked *no tab* (with End session
+on it): its tab showed the chat's first prompt ("from your printed guide …") while Shepherd compared
+only the transcript's AI title ("Project onboarding"). Two fixes: every name a tab can show is
+compared (custom title, AI title, first prompt, last prompt), and — the real guard — a window can
+only have a tab-less session when it has **more sessions than Claude tabs**; only unmatched sessions
+that are exactly that surplus are marked, and an unnamed session makes the window unjudgeable. The
+marker was paused on the live panel until this shipped. Fixtures: `tests/core.test.lua` (the
+wgsUltra case, red before: one session, one tab, different names was flagged) and
+`tests/tabless.test.lua`.
+
 ## 2026-09-11 — Sessions with no tab
 
 ### Fixed — a leftover claude process passed for a second tab in its window

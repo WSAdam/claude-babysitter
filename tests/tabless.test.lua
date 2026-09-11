@@ -36,6 +36,14 @@ for _, s in ipairs({ { "6698", "25135", "Chargeback Sentinel handoff and QuickBa
     s[1], REPO, now - 60, now - 60, s[2], T .. "/" .. s[1] .. ".jsonl"))
 end
 write(BR .. "/1051.json", json.encode({ v = 1, pid = 1051, version = "0.1.0", tabs = { { label = "Chargeback Sentinel hand…", group = 1, active = true } }, at = now }))
+-- 2026-09-11 (wgsUltra): a lone session whose tab shows its FIRST PROMPT, not its AI title
+os.execute('mkdir -p "' .. T .. '/wgsUltra"')
+write(T .. "/wg.jsonl", '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"from your printed guide show me the onboarding"}]}}\n'
+  .. '{"type":"ai-title","aiTitle":"Project onboarding","sessionId":"wg"}\n')
+write(T .. "/status/wg.json", string.format(
+  '{"status":"done","session_id":"wg","name":"wgsUltra","cwd":"%s","since":%d,"updated":%d,"editor":"vscode","host_window":"1052","session_pid":"3000","transcript_path":"%s"}',
+  T .. "/wgsUltra", now - 60, now - 60, T .. "/wg.jsonl"))
+write(BR .. "/1052.json", json.encode({ v = 1, pid = 1052, version = "0.1.0", tabs = { { label = "from your printed guide …", group = 1, active = true } }, at = now }))
 
 local realGetenv = os.getenv
 local ENV = { CC_STATUS_DIR = T .. "/status", CC_WORKLIST_FILE = T .. "/worklist.json",
@@ -128,6 +136,8 @@ check("both sessions are on the panel", I["6698"] and I["957b"])
 if not (I["6698"] and I["957b"]) then finish() end
 check("the leftover with no tab is marked tab-less", I["957b"].tabless == true)
 check("...the real tab isn't", not I["6698"].tabless)
+check("a lone session whose tab shows its first prompt, not its AI title, is never tab-less (wgsUltra)",
+      I.wg and not I.wg.tabless)
 check("it still counts toward the shared window until it's gone (it could be the Claude sidebar)",
       I["6698"].sharedWindow == 2)
 local row
