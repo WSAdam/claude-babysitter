@@ -53,6 +53,8 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want to decide in the batch approval whether Claude may merge its units when green, so that I keep the last word on main when I want it.
 - As a **fleet operator**, I want a batch's merge permission to cover only each unit's own session and branch, and Stop batch to revoke it at once, so that the grant can't be stretched.
 - As a **developer**, I want a session's question to flash on its card with its answers as buttons, and my click to answer it, so that a session waiting on me never waits for me to find its tab.
+- As a **developer**, I want every card that waits on me to read Needs you with a red pulse and always offer a button, so that I never miss one and never face a red card with nothing to press.
+- As a **developer**, I want Shepherd's messages inside its own panel instead of centre-screen overlays, so that nothing covers the windows I'm working in.
 
 ## Session observability
 

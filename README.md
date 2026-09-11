@@ -200,8 +200,10 @@ background** and ends its turn, and Claude Code wakes it when you answer. (Askin
 tab's worktree works too where nothing fences it, but Claude Code's worktree guard can refuse to
 run the script there — so fenced tabs ask from outside and step back in to rebase.)
 
-- **The card** says *⇡ ready to merge fix/x → main*, gets a teal ring, leads its project card like
-  an approval does, and you get one alert (plus an OS banner if approval banners are on).
+- **The card** says *⇡ ready to merge fix/x → main* and reads **Needs you** with a red dot and a
+  pulsing red ring — like an approval, and like every card waiting on you (a batch to approve, a
+  question) — leads its project card, and you get one alert (plus an OS banner if approval banners
+  are on). A card that says Needs you always has something to press.
   Shepherd checks the request with **its own git** first — the worktree is one of the repo's, on
   the requested branch, clean and ahead of main — and says what's wrong otherwise.
 - **The review** (the detail panel, or **Review** in the Instances view): the session's summary,
@@ -216,9 +218,12 @@ run the script there — so fenced tabs ask from outside and step back in to reb
   note back, and the unit stays in its worktree.
 - **The tab closes itself.** Once `done` reports the merge, Shepherd checks with its own git that
   the merged commit is in main and the worktree is gone, waits for the session's last turn to end,
-  and has the tab bridge close that tab. If it can't (no bridge in that window, a tab name shared
-  by two tabs, a terminal session) or git disagrees, the card says *merged — close its tab
-  yourself* and why. `"merge": { "closeTab": false }` leaves every tab open.
+  and has the tab bridge close that tab — a batch unit's tab by the tag the bridge gave it, any
+  other (or an untagged one) by its name, on a single match. If it can't (no bridge in that
+  window, a tab name shared by two tabs, a terminal session) or git disagrees, the card says
+  *merged — close its tab yourself* and why, with **Close tab** (try again now) and **Dismiss**
+  (clear it from the card); a *blocked* unit's card has Dismiss too.
+  `"merge": { "closeTab": false }` leaves every tab open.
 - No keystrokes: the request and your answer are files in `~/.claude/cc-merge/`, and the answer is
   bound to the request it's for. `"merge": { "enabled": false }` makes Shepherd ignore requests.
 
