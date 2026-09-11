@@ -2839,6 +2839,36 @@ function FX.batchStop(driverKey, id)
   return true
 end
 
+-- A batch ends itself (2026-09-11): each unit's outcome is recorded from its merge request, and
+-- once every unit has one (or the repo is gone) Shepherd stops the batch as finished.
+function FX.fleetRepoGone(b)
+  return not FX.fileExists(b.repo)
+end
+
+function FX.fleetRecordResult(r)
+  if not (r and (r.phase == "merged" or r.phase == "merged-dirty" or r.phase == "blocked")) then return end
+  for id, b in pairs(FX._fleetBatches or {}) do
+    if b.commonDir == r.commonDir then
+      local state = FX.fleetState(id)
+      local slug = core.fleetUnitOfRequest(b, state, r)
+      if slug and state.units[slug].result ~= r.phase then
+        state.units[slug].result = r.phase
+        FX.saveFleetState(id)
+        print("[cc-dashboard] ⇉ unit " .. slug .. " of batch " .. id .. ": " .. r.phase)
+      end
+    end
+  end
+end
+
+function FX.fleetFinish(id, b, why)
+  local state = FX.fleetState(id)
+  state.grant.stopped = true
+  state.grant.finished = why
+  FX.saveFleetState(id)
+  FX.writeFile(FX.FLEET_DIR .. "/" .. id .. ".stop", "")
+  FX.mergeAlert("⇉ Batch \"" .. b.title .. "\" finished: " .. why)
+end
+
 -- The unit tag ("<batch>:<slug>") of the batch unit this session is, if it is one.
 function FX.fleetUnitTagOf(it)
   if type(it) ~= "table" then return nil end
@@ -2974,6 +3004,8 @@ function FX.annotateFleet(list, cfg, bannerOn)
       state.grant.stopped = true
       FX.saveFleetState(id)
     end
+    local finished, fwhy = core.batchFinished(b, state.grant, state, FX.fleetRepoGone(b))
+    if finished then FX.fleetFinish(id, b, fwhy) end
     for _, u in ipairs(b.units) do
       local reqFile = FX.FLEET_DIR .. "/" .. id .. ".tab-" .. u.slug .. ".json"
       local raw = FX.readFile(reqFile)
@@ -3441,6 +3473,7 @@ function FX.annotateMerges(list, cfg, bannerOn)
   for key, r in pairs(reqs) do
     local it = items[key]
     local facts, rd
+    FX.fleetRecordResult(r)   -- a batch unit's outcome (its batch ends itself once all are in)
     if r.phase == "requested" then
       facts = FX.mergeFacts(r)
       rd = core.mergeReadiness(r, facts, it)

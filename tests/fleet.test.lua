@@ -127,6 +127,8 @@ local ok, err = quiet(function() dofile(ROOT .. "claude-dashboard.lua") end)
 check("the dashboard loads and runs its first refresh", ok)
 if not ok then print("       " .. tostring(err)); finish() end
 local fx = rawget(_G, "__ccDashboard").fx
+-- the test's repos (/r/A) are made-up paths: only b3's repo counts as gone (FX.fleetRepoGone)
+fx.fleetRepoGone = function(bb) return bb.id == "b3" end
 local function tick() return quiet(function() fx._refreshBody() end) end
 local function items() local t = {} for _, it in ipairs(fx._shownItems or {}) do t[it.key] = it end return t end
 local function alerted(needle) local n = 0 for _, a in ipairs(alerts) do if a:find(needle, 1, true) then n = n + 1 end end return n end
@@ -247,6 +249,36 @@ check("a unit tab that didn't open is refused, with the reason  (" .. tostring(a
       ab0 and ab0.ok == false and ab0.nonce == "t-beta0" and tostring(ab0.reason):find("wasn't in front", 1, true) ~= nil)
 check("...and no session is recorded for it", not ((fx._fleetState.b1.units or {}).beta or {}).session)
 os.remove(FD .. "/b1.tab-beta.answer")
+
+-- 2026-09-11 live: a batch whose units had all merged kept "⇉ driving 2 units" on the driver's card
+-- for hours, because the driver never ran stop. A finished batch ends itself.
+write(FD .. "/b2.json", json.encode({ v = 1, id = "b2", nonce = "n-b2", driver = { session_id = "drv", pid = "4242", name = "A-drv" },
+  repo = "/r/A", commonDir = "/r/A/.git", title = "One helper", mergeWhenGreen = false, at = now - 7200, phase = "approved",
+  units = { { type = "feat", slug = "gamma", task = "Add gamma.", branch = "feat/gamma" } } }))
+write(FD .. "/b2.state.json", json.encode({ grant = { approved = true, grantMerge = false, at = now - 7200 },
+  units = { gamma = { session = { id = "ug", name = "A-g", pid = "5003" } } } }))
+status("ug", "/r/A", "5003")
+write(MD .. "/ug.json", json.encode({ v = 1, key = "ug", session_id = "ug", pid = "5003", nonce = "m-ug",
+  worktree = "/r/A/.claude/worktrees/gamma", branch = "feat/gamma", base = "main", commonDir = "/r/A/.git",
+  summary = "gamma", tests = "green", ahead = 0, at = now, phase = "merged", sha = "abc1234" }))
+fx._fleetState.b2 = nil
+tick(); tick()
+local s2 = decoded(FD .. "/b2.state.json")
+check("a unit's merge is recorded as its outcome", s2 and s2.units and s2.units.gamma and s2.units.gamma.result == "merged")
+check("...and with every unit done, the batch ends itself  (" .. tostring(s2 and s2.grant and s2.grant.finished) .. ")",
+      s2 and s2.grant and s2.grant.stopped == true and s2.grant.finished == "1 merged")
+check("...and says so once", alerted("One helper") == 1)
+tick()
+I = items()
+check("a finished batch's panel leaves the driver's card", not (I.drv.fleet and I.drv.fleet.id == "b2"))
+write(FD .. "/b3.json", json.encode({ v = 1, id = "b3", nonce = "n-b3", driver = { session_id = "drv", pid = "4242", name = "A-drv" },
+  repo = "/r/gone", commonDir = "/r/gone/.git", title = "Gone repo", mergeWhenGreen = false, at = now - 7200, phase = "approved",
+  units = { { type = "feat", slug = "delta", task = "Add delta.", branch = "feat/delta" } } }))
+write(FD .. "/b3.state.json", json.encode({ grant = { approved = true, at = now - 7200 }, units = {} }))
+tick()
+local s3 = decoded(FD .. "/b3.state.json")
+check("a batch whose repo is gone ends itself", s3 and s3.grant and s3.grant.stopped == true and s3.grant.finished == "its repo is gone")
+alerts = {}
 
 -- Stop
 quiet(function() fx.batchStop("drv", "b1") end)

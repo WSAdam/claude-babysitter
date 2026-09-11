@@ -247,7 +247,9 @@ Ask a Claude session to run several units in parallel and it can drive the whole
    its own git check passes — one merge per repo at a time; without it, units wait for your Merge.
    Tabs close after their merges as usual.
 5. **Stop batch** (on the driver's card) — or `cc-fleet.sh stop` — ends it at once: no more tabs,
-   no more merges on its grant.
+   no more merges on its grant. A batch also **ends itself** once every unit has merged or
+   blocked (or its repo is gone): Shepherd records each unit's outcome from its merge request, says
+   *batch finished: … (2 merged)* once, and the panel leaves the driver's card.
 
 Your approval lives in Shepherd (`~/.claude/cc-fleet/<id>.state.json`), never in the proposal's own
 file. `"fleet": { "enabled": false }` makes Shepherd ignore proposals.

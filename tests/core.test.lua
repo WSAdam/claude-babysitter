@@ -9142,6 +9142,26 @@ do
   local treg = { ["9"] = { at = 995, tabs = { { label = "Claude Code", unit = "b1:cheer" } } } }
   local tl2 = core.tablessKeys(tlist, treg, { u1 = { "Claude Code", "unit:b1:cheer" }, u2 = { "Old chat" } }, 1000)
   check("tab-less: a unit's session matches its tagged tab, so only the other one is tab-less", not tl2.u1 and tl2.u2 == true)
+
+  -- 2026-09-11 live: a batch whose units had both merged kept "⇉ driving 2 units" on the driver's
+  -- card for hours -- the driver never ran stop. A finished batch now ends itself.
+  local fb = core.parseBatch(bj())
+  local fg = { approved = true, grantMerge = true, at = 100 }
+  local function units(a, bt) return { units = { alpha = { session = { id = "sa" }, result = a }, beta = { session = { id = "sb" }, result = bt } } } end
+  check("finished: not while a unit has no outcome", core.batchFinished(fb, fg, units("merged", nil), false) == false)
+  local fin, fwhy = core.batchFinished(fb, fg, units("merged", "blocked"), false)
+  check("finished: every unit merged or blocked  (" .. tostring(fwhy) .. ")", fin == true and fwhy == "1 merged, 1 blocked")
+  check("finished: merged-dirty counts as merged", select(2, core.batchFinished(fb, fg, units("merged-dirty", "merged"), false)) == "2 merged")
+  local gone, gwhy = core.batchFinished(fb, fg, units(nil, nil), true)
+  check("finished: its repo is gone  (" .. tostring(gwhy) .. ")", gone == true and gwhy == "its repo is gone")
+  check("finished: never a batch that wasn't approved", core.batchFinished(fb, {}, units("merged", "merged"), false) == false)
+  check("finished: never twice (already stopped)",
+        core.batchFinished(fb, { approved = true, stopped = true }, units("merged", "merged"), false) == false)
+  eq("a merge request's unit: its own session on its own branch",
+     core.fleetUnitOfRequest(fb, units(nil, nil), { session_id = "sb", branch = "fix/beta" }), "beta")
+  eq("...not another session on that branch", core.fleetUnitOfRequest(fb, units(nil, nil), { session_id = "zz", branch = "fix/beta" }), nil)
+  local fv = core.batchView(fb, { approved = true, stopped = true, finished = "2 merged" }, units("merged", "merged"))
+  eq("a finished batch says so on the card", fv.line, "⇉ batch finished: Two helpers (2 merged)")
 end
 
 -- ---- Shepherd answers: a session's question answered from its card (2026-09-11) ----------

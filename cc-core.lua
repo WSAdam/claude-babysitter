@@ -1853,6 +1853,37 @@ function M.fleetDelegatedMerge(batch, grant, state, req)
   return false
 end
 
+-- Which unit of this batch a merge request belongs to: its own session on its own branch.
+function M.fleetUnitOfRequest(batch, state, req)
+  if type(batch) ~= "table" or type(req) ~= "table" then return nil end
+  for _, u in ipairs(batch.units or {}) do
+    local us = type(state) == "table" and type(state.units) == "table" and state.units[u.slug] or nil
+    if u.branch == req.branch and type(us) == "table" and type(us.session) == "table"
+       and us.session.id ~= nil and us.session.id == req.session_id then
+      return u.slug
+    end
+  end
+  return nil
+end
+
+-- Has an approved batch run its course? (2026-09-11: a driver that never ran stop left "driving
+-- 2 units" on its card for hours.) Every unit has an outcome -- merged (merged-dirty counts) or
+-- blocked -- or its repo is gone. Returns true + the reason the card shows.
+function M.batchFinished(batch, grant, state, repoGone)
+  if type(batch) ~= "table" or type(grant) ~= "table" or not grant.approved or grant.stopped then return false end
+  if repoGone then return true, "its repo is gone" end
+  local merged, blocked = 0, 0
+  for _, u in ipairs(batch.units or {}) do
+    local us = type(state) == "table" and type(state.units) == "table" and state.units[u.slug] or nil
+    local r = type(us) == "table" and us.result or nil
+    if r == "merged" or r == "merged-dirty" then merged = merged + 1
+    elseif r == "blocked" then blocked = blocked + 1
+    else return false end
+  end
+  if merged + blocked == 0 then return false end
+  return true, merged .. " merged" .. (blocked > 0 and (", " .. blocked .. " blocked") or "")
+end
+
 -- What the driver's card and the review get.
 function M.batchView(batch, grant, state)
   grant = type(grant) == "table" and grant or {}
@@ -1871,6 +1902,7 @@ function M.batchView(batch, grant, state)
   if phase == "proposed" then v.line = "⇉ proposes " .. n .. " unit" .. ((n == 1) and "" or "s") .. " in " .. folder
   elseif phase == "approved" then
     v.line = "⇉ driving " .. n .. " unit" .. ((n == 1) and "" or "s") .. " in " .. folder .. (grant.grantMerge and " · merges delegated" or "")
+  elseif phase == "stopped" and grant.finished then v.line = "⇉ batch finished: " .. batch.title .. " (" .. tostring(grant.finished) .. ")"
   elseif phase == "stopped" then v.line = "⇉ batch stopped: " .. batch.title
   else v.line = "⇉ batch denied: " .. batch.title end
   v.needsYou = (phase == "proposed")

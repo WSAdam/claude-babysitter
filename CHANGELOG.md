@@ -4,6 +4,16 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — A batch ends itself
+
+### Fixed — a finished batch stayed on the driver's card
+
+Both units of a batch had merged, but its driver never ran `cc-fleet.sh stop`, so "⇉ driving 2
+units" stayed on the card for hours. Shepherd now records each unit's outcome from its merge request
+(merged, blocked) and ends the batch once every unit has one, or once its repo is gone. It says
+"batch finished: … (2 merged)" once, and the panel leaves the card. Fixtures: `tests/core.test.lua`
+(`core.batchFinished`, `core.fleetUnitOfRequest`) and `tests/fleet.test.lua`.
+
 ## 2026-09-11 — Messages stay inside Shepherd's panel
 
 ### Changed — no more centre-screen overlays
