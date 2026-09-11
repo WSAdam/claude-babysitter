@@ -15,6 +15,13 @@ click to dismiss) and logs to the console. `"alerts": { "onScreen": true }` brin
 Tests: a source pin that `hs.alert.show` has exactly one caller, and the stubbed-panel suites now
 read the toasts.
 
+### Fixed — a card waiting on Adam read a green "Ready for you"
+
+A driver's batch waited for Adam's approval, but the driver had finished its turn, so the card said
+"Ready for you" in green with only a thin ring. Any card waiting on Adam — a batch to approve, a
+merge to click, a held question — now reads **Needs you** with the red dot, a pulsing red ring and
+its action line in bold red, like a permission prompt. Fixture: `tests/needs-you.test.js`.
+
 ### Fixed — a question hid behind merged units on its project card
 
 A unit's held question sat under "also: 2 needing you" because two older merged units ("close its

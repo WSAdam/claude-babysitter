@@ -8364,8 +8364,9 @@ local HTML = [[
   #d-ask .ask-send:disabled { opacity:.4; cursor:default; }
   #d-ask .ask-release { font-size:11px; color:var(--muted); background:none; border:1px solid #3a4a66; border-radius:8px;
     padding:3px 10px; cursor:pointer; font-family:inherit; }
-  .tile.asking { animation:askglow 1.2s ease-in-out infinite; }
-  @keyframes askglow { 0%,100% { box-shadow:0 0 0 2px var(--st-approval); } 50% { box-shadow:0 0 0 2px var(--st-approval), 0 0 14px var(--st-approval); } }
+  .tile.needs { animation:askglow 1.2s ease-in-out infinite; }
+  @keyframes askglow { 0%,100% { box-shadow:0 0 0 3px var(--st-approval); } 50% { box-shadow:0 0 0 3px var(--st-approval), 0 0 22px var(--st-approval); } }
+  .tile.needs .meta { color:var(--st-approval); font-weight:600; }
   .in-ask { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
   #d-meta { display:none; font-size:11px; color:var(--muted); margin:8px 0 0; }
   #d-lineage { display:none; font-size:11px; color:var(--muted); margin:4px 0 0; }
@@ -9996,8 +9997,13 @@ local HTML = [[
     // auto-feed all key off the real status). tileHtml + renderDetail BOTH route
     // through these so the dot colour and the words never drift apart.
     function bgRunning(it){ return !!(it && it.bg_active && (it.status === "done" || it.status === "idle")); }
-    function effStatus(it){ return bgRunning(it) ? "working" : ((it && it.status) || "idle"); }
+    // Waiting on Adam without a permission prompt (2026-09-11): a batch to approve, a merge to
+    // click, a held question. The card must say so as loudly as an approval does -- a finished
+    // driver used to read a green "Ready for you" while its batch waited for him.
+    function needsYouNow(it){ return !!(it && (it.askHeld || (it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou))); }
+    function effStatus(it){ return needsYouNow(it) ? "approval" : (bgRunning(it) ? "working" : ((it && it.status) || "idle")); }
     function statusWords(it){
+      if(needsYouNow(it)) return LABELS.approval;
       if(bgRunning(it)){ var n = (it && it.bg_count) || 0; return "Running " + n + " agent" + (n === 1 ? "" : "s"); }
       var st = (it && it.status) || "idle"; return LABELS[st] || st;
     }
@@ -15299,7 +15305,7 @@ local HTML = [[
       if(it.hung){ meta = (meta ? meta + " · " : "") + "⏳ stalled"; }
       if(it.looping){ meta = (meta ? meta + " · " : "") + "⟳ looping"; }   // L5 loop watchdog
       if(it.churn){ meta = (meta ? meta + " · " : "") + "♻️" + it.churn; }   // respawn/clear churn today
-      var cls = "tile s-" + stCls + (it.stale && !bgRunning(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + ((it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou) ? " merge" : "") + (it.askHeld ? " asking" : "") + (it.key === selectedKey ? " sel" : "");
+      var cls = "tile s-" + stCls + (it.stale && !bgRunning(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + ((it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou) ? " merge" : "") + (needsYouNow(it) ? " needs" : "") + (it.key === selectedKey ? " sel" : "");
       // select + double-click jump are decided at mousedown by onGridMouseDown (below):
       // a grid rebuild mid-press detaches the tile, so inline click handlers were lost
       // data-stack: this card's project stack (focus-group + the Instances button read it)
