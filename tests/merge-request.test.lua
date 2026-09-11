@@ -244,6 +244,24 @@ quiet(function() fx.mergeDiff("b1") end)
 local pushed = table.concat(js, "\n")
 check("Full diff pushes the diff to the panel as JSON data", pushed:find("window.ccMergeDiff(", 1, true) ~= nil and pushed:find("diff --git", 1, true) ~= nil)
 
+-- 2026-09-11 live: a finished merge ("merged -- close its tab yourself") turned the card red with
+-- nothing to press. A finished card has Dismiss (and Close tab); a live request can't be dismissed.
+quiet(function() fx.mergeDismiss("d1") end)
+check("Dismiss never clears a request still waiting for Merge", read(MD .. "/d1.json") ~= nil)
+local d1 = json.decode(read(MD .. "/d1.json"))
+d1.phase, d1.note = "blocked", "tests disagree"
+write(MD .. "/d1.json", json.encode(d1))
+tick()
+local dI = nil
+for _, it in ipairs(fx._shownItems or {}) do if it.key == "d1" then dI = it end end
+check("...(it does: blocked)", dI and dI.merge and dI.merge.needsYou == true)
+quiet(function() fx.mergeDismiss("d1") end)
+check("Dismiss clears a finished request", read(MD .. "/d1.json") == nil)
+tick()
+dI = nil
+for _, it in ipairs(fx._shownItems or {}) do if it.key == "d1" then dI = it end end
+check("...and the card stops needing Adam", dI and dI.merge == nil)
+
 -- closing a session drops its merge files
 quiet(function() fx.removeStatus("c1") end)
 check("removing a session drops its merge request and decision", read(MD .. "/c1.json") == nil and read(MD .. "/c1.decision") == nil)

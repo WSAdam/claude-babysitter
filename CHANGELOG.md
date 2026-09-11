@@ -15,6 +15,20 @@ click to dismiss) and logs to the console. `"alerts": { "onScreen": true }` brin
 Tests: a source pin that `hs.alert.show` has exactly one caller, and the stubbed-panel suites now
 read the toasts.
 
+### Fixed — a finished merge made the card red with nothing to press
+
+"merged — close its tab yourself" (a restored tab with no unit tag, named "/clear") needed Adam but
+offered no button. Closing a unit's tab now falls back to the tab's name (a tab that starts with a
+slash command is named after it, as the extension does), and a finished merge that needs Adam has
+**Close tab** and **Dismiss** in its review. Fixtures in `tests/core.test.lua`, `tests/fleet.test.lua`,
+`tests/merge-request.test.lua` and `tests/needs-you.test.js`.
+
+### Fixed — a batch unit's session was taken from a restored tab
+
+When Shepherd had to open the repo's window first, VS Code restored its old Claude tabs and one that
+resumed was recorded as the unit's, although the unit's tab never opened. The unit's session is now
+accepted only after Shepherd confirms it opened the tab (`FX.openClaudeTab`'s `beforeOpen`/`onDone`).
+
 ### Fixed — a card waiting on Adam read a green "Ready for you"
 
 A driver's batch waited for Adam's approval, but the driver had finished its turn, so the card said

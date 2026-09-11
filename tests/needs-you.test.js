@@ -61,5 +61,17 @@ const tile = slice("    function tileHtml(it){", "\n    }\n") || "";
 check("the tile pulses whenever it needs Adam (class needs)", tile.indexOf('(needsYouNow(it) ? " needs" : "")') >= 0);
 check("the pulse is styled", /\.tile\.needs \{ animation:askglow/.test(src));
 
+// 2026-09-11 live: "merged -- close its tab yourself" made the card red with nothing to press. Every
+// finished merge state that needs Adam gets buttons in the review: Close tab (merged, tab open) and Dismiss.
+const rm = slice("    function renderMerge(it){", "\n    }\n") || "";
+check("the review shows its finished-state buttons when a finished merge needs Adam",
+      rm.indexOf('document.getElementById("dm-done").style.display = (!asking && m.needsYou) ? "flex" : "none";') >= 0);
+check("...Close tab only while the merged unit's tab is still open",
+      rm.indexOf('document.getElementById("dm-closetab").style.display = (m.phase === "merged" && m.closeNote) ? "" : "none";') >= 0);
+check("the buttons exist and send their actions",
+      src.indexOf("mergeAct('merge-close-tab')") >= 0 && src.indexOf("mergeAct('merge-dismiss')") >= 0);
+check("Shepherd handles both actions",
+      src.indexOf('if a == "merge-close-tab" then') >= 0 && src.indexOf('if a == "merge-dismiss" then') >= 0);
+
 console.log("-- needs-you.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed === 0 ? 0 : 1);

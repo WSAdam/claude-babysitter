@@ -3369,6 +3369,32 @@ function FX.mergeAutoClose(r, it)
   return FX._mergeCloseTry[r.nonce].why
 end
 
+-- A finished merge's buttons (2026-09-11): a red card must have something to press.
+-- Close tab: try the tab bridge now (by tag, else by name), saying why when it can't.
+function FX.mergeCloseTab(key)
+  local r, it = FX._mergeReqs[key], FX._mergeItems[key]
+  if not (r and it) then FX.mergeAlert("⚠️ That merge is gone"); return false end
+  FX._mergeCloseTry[r.nonce] = nil
+  local sent = FX.closeTab(it)
+  if sent then FX._mergeClosing[r.nonce] = true end
+  return sent
+end
+
+-- Dismiss: clear a finished request (merged, blocked, merged-dirty) from the card. Never one
+-- still waiting for Merge -- that's what Not yet is for.
+function FX.mergeDismiss(key)
+  local r = core.parseMergeRequest(FX.readFile(FX.MERGE_DIR .. "/" .. key .. ".json"))
+  if not r then return false end
+  if r.phase == "requested" or r.phase == "approved" then
+    FX.mergeAlert("⚠️ That merge is still waiting -- use Merge or Not yet")
+    return false
+  end
+  os.remove(FX.MERGE_DIR .. "/" .. key .. ".json")
+  os.remove(FX.MERGE_DIR .. "/" .. key .. ".decision")
+  print("[cc-dashboard] 🧹 dismissed the finished merge of " .. tostring(r.branch) .. " (" .. tostring(r.phase) .. ")")
+  return true
+end
+
 -- Tick: stamp it.merge on each live session with a request, run the queue, alert once per
 -- state that wants Adam. Requests whose session is gone are ignored (and never block a repo).
 function FX.annotateMerges(list, cfg, bannerOn)
@@ -6349,6 +6375,8 @@ local function handleBridgeMsg(msg)
   if a == "merge-approve" then FX.mergeApprove(tostring(payload.v or "")); return end
   if a == "merge-hold" then FX.mergeHold(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "merge-diff" then FX.mergeDiff(tostring(payload.v or "")); return end
+  if a == "merge-close-tab" then FX.mergeCloseTab(tostring(payload.v or "")); return end
+  if a == "merge-dismiss" then FX.mergeDismiss(tostring(payload.v or "")); return end
   if a == "end-session" then FX.endSession(tostring(payload.v or "")); return end   -- tab-less only (verdict in core)
   -- Shepherd answers (2026-09-11): v = session key, text = JSON picks (checked in core)
   if a == "answer-ask" then FX.answerAskFromPanel(tostring(payload.v or ""), tostring(payload.text or "")); return end
@@ -9154,6 +9182,11 @@ local HTML = [[
         <input id="dm-note" maxlength="500" placeholder="Note for the session (optional)">
         <button id="dm-hold" onclick="mergeAct('merge-hold')" title="Send the note back; the unit stays in its worktree">Not yet</button>
         <button id="dm-diffbtn" onclick="mergeDiff()">Full diff</button>
+      </div>
+      <!-- a finished merge that still needs Adam always has something to press (2026-09-11) -->
+      <div class="dm-acts" id="dm-done">
+        <button id="dm-closetab" onclick="mergeAct('merge-close-tab')" title="Have the Shepherd tab bridge close this session's tab">Close tab</button>
+        <button id="dm-dismiss" onclick="mergeAct('merge-dismiss')" title="Clear this finished merge from the card">Dismiss</button>
       </div>
     </div>
     <!-- L5 tab strip: groups the views Shepherd already renders. The bar is
@@ -13012,6 +13045,8 @@ local HTML = [[
       mergeFillList(document.getElementById("dm-commits"), asking ? commits : [], function(c){ return (c.h || "") + "  " + (c.s || ""); });
       mergeFillList(document.getElementById("dm-files"), asking ? files : [], function(f){ return (f.st || "") + "  " + (f.path || ""); });
       document.getElementById("dm-acts").style.display = asking ? "flex" : "none";
+      document.getElementById("dm-done").style.display = (!asking && m.needsYou) ? "flex" : "none";
+      document.getElementById("dm-closetab").style.display = (m.phase === "merged" && m.closeNote) ? "" : "none";
       var bm = document.getElementById("dm-merge");
       bm.disabled = !(m.ready && !m.queued);
       bm.title = m.queued ? "Already queued behind another merge in this repo"
