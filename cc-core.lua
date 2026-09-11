@@ -678,19 +678,19 @@ function M.claudeTabLabel(title)
   return table.concat(out) .. "…"
 end
 
-M.BRIDGE_FRESH = 45   -- the bridge rewrites its registry every 15s; older = not running
+M.TAB_BRIDGE_FRESH = 45   -- the bridge rewrites its registry every 15s; older = not running
 
 -- May Shepherd ask the bridge to close the tab named `label`? Only when that window's
 -- registry is fresh and exactly one of its Claude tabs carries the name. ok, reason.
-function M.bridgeCloseVerdict(reg, label, now)
+function M.tabBridgeCloseVerdict(reg, label, now)
   if type(label) ~= "string" or label == "" then
     return false, "its tab has no name yet, so it can't be told apart"
   end
   if type(reg) ~= "table" or type(reg.tabs) ~= "table" then
-    return false, "the Shepherd bridge isn't running in its VS Code window (Developer: Reload Window there once)"
+    return false, "the Shepherd tab bridge isn't running in its VS Code window (Developer: Reload Window there once)"
   end
-  if (tonumber(now) or 0) - (tonumber(reg.at) or 0) > M.BRIDGE_FRESH then
-    return false, "the Shepherd bridge in its VS Code window stopped reporting"
+  if (tonumber(now) or 0) - (tonumber(reg.at) or 0) > M.TAB_BRIDGE_FRESH then
+    return false, "the Shepherd tab bridge in its VS Code window stopped reporting"
   end
   local n = 0
   for _, t in ipairs(reg.tabs) do
@@ -702,7 +702,7 @@ function M.bridgeCloseVerdict(reg, label, now)
 end
 
 -- The one command the bridge takes. The id becomes a file name in its outbox.
-function M.bridgeCommand(key, label, now)
+function M.tabBridgeCommand(key, label, now)
   local safe = tostring(key or "s"):gsub("[^%w._-]", "_"):sub(1, 40)
   return { v = 1, id = safe .. "-" .. tostring(math.floor(tonumber(now) or 0)), op = "close",
            label = label, at = math.floor(tonumber(now) or 0) }
@@ -711,7 +711,7 @@ end
 -- Doctor: the VS Code windows hosting sessions (by host_window) vs the ones with a fresh
 -- bridge registry. Kitty and remote tiles have no VS Code window here. `registries` maps
 -- host pid -> decoded registry (or nil). Returns { windows, covered, missing = {names} }.
-function M.bridgeCoverage(list, registries, now)
+function M.tabBridgeCoverage(list, registries, now)
   local names, order = {}, {}
   for _, it in ipairs(list or {}) do
     if type(it) == "table" and not it.remote and it.editor ~= "kitty" and it.editor ~= "terminal" then
@@ -722,7 +722,7 @@ function M.bridgeCoverage(list, registries, now)
   local covered, missing = 0, {}
   for _, hw in ipairs(order) do
     local reg = type(registries) == "table" and registries[hw] or nil
-    if type(reg) == "table" and (tonumber(now) or 0) - (tonumber(reg.at) or 0) <= M.BRIDGE_FRESH then
+    if type(reg) == "table" and (tonumber(now) or 0) - (tonumber(reg.at) or 0) <= M.TAB_BRIDGE_FRESH then
       covered = covered + 1
     else
       missing[#missing + 1] = names[hw]
@@ -10911,15 +10911,15 @@ function M.doctorChecks(facts)
   else add("Gate disarmed", "info", "auto-approve policies apply; arm it in Settings") end
 
   -- 2026-09-11: the companion extension (closes an exact Claude tab without keystrokes)
-  local br = type(facts.bridge) == "table" and facts.bridge or nil
+  local br = type(facts.tabBridge) == "table" and facts.tabBridge or nil
   if br and (tonumber(br.windows) or 0) > 0 then
     local miss = type(br.missing) == "table" and br.missing or {}
     if #miss == 0 then
-      add("Shepherd bridge in every VS Code window", "ok", br.covered .. "/" .. br.windows .. " windows can close a tab by name")
+      add("Shepherd tab bridge in every VS Code window", "ok", br.covered .. "/" .. br.windows .. " windows can close a tab by name")
     else
-      add("Shepherd bridge missing in " .. #miss .. " VS Code window" .. ((#miss == 1) and "" or "s"), "warn",
+      add("Shepherd tab bridge missing in " .. #miss .. " VS Code window" .. ((#miss == 1) and "" or "s"), "warn",
           "no bridge in: " .. table.concat(miss, ", ") .. " -- Close on its shared-window tabs stays refused",
-          "Developer: Reload Window in that window (or run: make bridge)")
+          "Developer: Reload Window in that window (or run: make tab-bridge)")
     end
   end
 

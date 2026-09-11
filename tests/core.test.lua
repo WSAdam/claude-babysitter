@@ -8632,19 +8632,19 @@ do
 
   local now = 1000
   local reg = { v = 1, pid = 500, at = 990, tabs = { { label = "Fix login" }, { label = "Claude Code" }, { label = "Claude Code" } } }
-  check("close verdict: exactly one tab with the name", core.bridgeCloseVerdict(reg, "Fix login", now) == true)
-  local ok, why = core.bridgeCloseVerdict(reg, "Claude Code", now)
+  check("close verdict: exactly one tab with the name", core.tabBridgeCloseVerdict(reg, "Fix login", now) == true)
+  local ok, why = core.tabBridgeCloseVerdict(reg, "Claude Code", now)
   check("close verdict: two tabs share the name -> refused  (" .. tostring(why) .. ")", ok == false and why:find("2 Claude tabs", 1, true))
-  ok, why = core.bridgeCloseVerdict(reg, "Gone", now)
+  ok, why = core.tabBridgeCloseVerdict(reg, "Gone", now)
   check("close verdict: no tab with the name -> refused  (" .. tostring(why) .. ")", ok == false and why:find("no Claude tab named", 1, true))
-  ok, why = core.bridgeCloseVerdict(reg, nil, now)
+  ok, why = core.tabBridgeCloseVerdict(reg, nil, now)
   check("close verdict: a nameless session -> refused  (" .. tostring(why) .. ")", ok == false and why:find("no name", 1, true))
-  ok, why = core.bridgeCloseVerdict(nil, "Fix login", now)
+  ok, why = core.tabBridgeCloseVerdict(nil, "Fix login", now)
   check("close verdict: no bridge in that window -> refused  (" .. tostring(why) .. ")", ok == false and why:find("isn't running", 1, true))
-  ok, why = core.bridgeCloseVerdict({ v = 1, at = 900, tabs = reg.tabs }, "Fix login", now)
+  ok, why = core.tabBridgeCloseVerdict({ v = 1, at = 900, tabs = reg.tabs }, "Fix login", now)
   check("close verdict: a bridge that stopped reporting -> refused  (" .. tostring(why) .. ")", ok == false and why:find("stopped reporting", 1, true))
 
-  local cmd = core.bridgeCommand("a/b key", "Fix login", 1234)
+  local cmd = core.tabBridgeCommand("a/b key", "Fix login", 1234)
   eq("command: close by label", cmd.op .. "|" .. cmd.label .. "|" .. cmd.at .. "|" .. cmd.v, "close|Fix login|1234|1")
   check("command: its id is safe as a file name  (" .. cmd.id .. ")", cmd.id:match("^[%w._-]+$") ~= nil and #cmd.id <= 64)
 
@@ -8671,16 +8671,16 @@ do
   local list = { vs({ key = "a", host_window = "500" }), vs({ key = "b", host_window = "500" }),
                  vs({ key = "c", name = "wgsUltra", host_window = "600", sharedWindow = nil }),
                  vs({ key = "k", editor = "kitty", host_window = "700" }), vs({ key = "r", remote = { host = "x" }, host_window = "800" }) }
-  local cov = core.bridgeCoverage(list, { ["500"] = { at = 995, tabs = {} }, ["600"] = { at = 100, tabs = {} } }, now)
+  local cov = core.tabBridgeCoverage(list, { ["500"] = { at = 995, tabs = {} }, ["600"] = { at = 100, tabs = {} } }, now)
   eq("coverage: counts the VS Code windows hosting sessions (not kitty or remote)", cov.windows, 2)
   eq("coverage: a window with a fresh registry has the bridge", cov.covered, 1)
   eq("coverage: names a window whose bridge is missing or stale", cov.missing[1], "wgsUltra")
-  local rows = core.doctorChecks({ bridge = cov })
+  local rows = core.doctorChecks({ tabBridge = cov })
   local row
   for _, x in ipairs(rows) do if x.label:find("bridge", 1, true) then row = x end end
   check("doctor: a missing bridge is a warning that says to reload that window",
         row and row.status == "warn" and row.detail:find("wgsUltra", 1, true) and (row.fix or ""):find("Reload Window", 1, true))
-  rows = core.doctorChecks({ bridge = { windows = 2, covered = 2, missing = {} } })
+  rows = core.doctorChecks({ tabBridge = { windows = 2, covered = 2, missing = {} } })
   row = nil
   for _, x in ipairs(rows) do if x.label:find("bridge", 1, true) then row = x end end
   check("doctor: every window covered is ok", row and row.status == "ok")

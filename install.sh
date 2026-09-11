@@ -248,7 +248,7 @@ fi
 # 4b. The companion VS Code extension (vscode-bridge/): lets Shepherd close one exact
 # Claude tab without keystrokes. Local package + VS Code's own CLI, warn-only.
 if [ -z "${CC_INSTALL_NO_BRIDGE:-}" ]; then
-  make -C "$HERE" --no-print-directory bridge || echo "⚠️  Shepherd bridge install skipped"
+  make -C "$HERE" --no-print-directory tab-bridge || echo "⚠️  Shepherd tab bridge install skipped"
 fi
 
 # 5. Tooling check (jq required; rg/fd optional accelerators). Non-interactive when no tty,

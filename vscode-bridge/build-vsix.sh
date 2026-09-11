@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-vsix.sh <outdir> - package the Shepherd bridge as a .vsix with plain `zip`: no
+# build-vsix.sh <outdir> - package the Shepherd tab bridge as a .vsix with plain `zip`: no
 # npm, no network, no Marketplace. A .vsix is a zip holding [Content_Types].xml, an
 # extension.vsixmanifest and the extension under extension/. Prints the package path.
 set -euo pipefail

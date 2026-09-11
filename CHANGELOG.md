@@ -4,7 +4,20 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
-## 2026-09-11 — The Shepherd bridge: close one exact Claude tab
+## 2026-09-11 — The tab bridge's switch is its own key
+
+### Fixed — Close-by-tab was off for anyone with the SSH remote bridge off
+
+The tab bridge's on/off switch read `bridge.enabled` — a key that already belongs to the SSH
+remote bridge (`FX.bridgeSync`, `bridge.intervalSeconds`), which is off by default. So on a real
+config Close on a shared-window session said "the Shepherd bridge is switched off" and Doctor
+hid the bridge line, and the example config grew a second top-level `"bridge"`. The switch is now
+`tabBridge.enabled`, and the tab bridge's functions, alerts and make target (`make tab-bridge`) say
+"tab bridge", so the two can't be confused again. Fixtures: `tests/shared-window.test.lua` now
+runs with Adam's config (remote bridge off) and `tests/ui.test.lua` pins one `"bridge"` in the
+example config and `tabBridge.enabled` in Close and Doctor — both red before the fix.
+
+## 2026-09-11 — The Shepherd tab bridge: close one exact Claude tab
 
 ### Added — a companion VS Code extension, and Close for sessions that share a window
 

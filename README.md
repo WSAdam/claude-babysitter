@@ -207,7 +207,7 @@ down, so they land even while a busy fleet is re-rendering the grid under the po
 whichever tab is in front. So a session whose window hosts other sessions gets **no keystroke
 action at all**: no nudge, queue feed, routed task, auto-continue, `/clear`, `/compact`,
 `/rc`, Rewind, model/effort/mode switch or key approval. **Close** is the exception: the
-Shepherd bridge (a small companion extension `make install` puts in VS Code) closes just that
+Shepherd tab bridge (a small companion extension `make install` puts in VS Code) closes just that
 session's Claude tab — no keystroke — when exactly one Claude tab in the window carries the
 session's name (its chat title, as the tab shows it). A fresh tab still named "Claude Code", two
 tabs with the same name, or a window without the bridge keep Close refused, with the reason.
@@ -1079,12 +1079,12 @@ install or replace Claude Code.
 The panel appears top-right. Drag it by its title bar, resize it, and it floats
 above other windows and shows on every Space.
 
-### The Shepherd bridge — a companion VS Code extension
+### The Shepherd tab bridge — a companion VS Code extension
 `make setup` and `make install` also put a small extension, **Shepherd Bridge**
-(`vscode-bridge/`), into VS Code. Nothing is published: `make bridge` zips it into a `.vsix`
+(`vscode-bridge/`), into VS Code. Nothing is published: `make tab-bridge` zips it into a `.vsix`
 and hands that to VS Code's own command-line tool (`code --install-extension`), found on your
 PATH or inside the app bundle (so a VS Code run from Downloads works too; set `CC_CODE_CLI` to
-point elsewhere). It reinstalls only when its version changes — `FORCE=1 make bridge` forces it —
+point elsewhere). It reinstalls only when its version changes — `FORCE=1 make tab-bridge` forces it —
 and a machine without VS Code just gets a warning. Open windows normally pick it up at once; one
 that doesn't needs **Developer: Reload Window** (Doctor lists those windows).
 
@@ -1092,7 +1092,8 @@ It runs in every VS Code window and does one thing: close a Claude tab **by name
 window writes its Claude tabs' names to `~/.claude/cc-bridge/<pid>.json`; Shepherd drops a close
 command in `<pid>.in/` and reads the answer from `<pid>.out/`. It closes a tab only when exactly
 one Claude tab in that window carries the name, never touches other tabs, and has no network
-access. `"bridge": { "enabled": false }` in `~/.claude/cc-config.json` stops Shepherd using it.
+access. `"tabBridge": { "enabled": false }` in `~/.claude/cc-config.json` stops Shepherd using
+it (it's not the SSH remote `"bridge"` section, which mirrors other machines' sessions).
 
 ### Shepherd.app — a Dock launcher
 `make setup` (or `make app`) builds **`~/Applications/Shepherd.app`** with a sheep

@@ -1152,12 +1152,12 @@ function FX.doctorStatus()
     for _, it in ipairs(src) do
       live[#live + 1] = it
       local hw = it.host_window and tostring(it.host_window)
-      if hw and regs[hw] == nil then regs[hw] = FX.bridgeRegistry(hw) or false end
+      if hw and regs[hw] == nil then regs[hw] = FX.tabBridgeRegistry(hw) or false end
     end
   end
   for hw, r in pairs(regs) do if r == false then regs[hw] = nil end end
   return core.doctorChecks({
-    bridge = (core.config(cfg, "bridge.enabled", true) ~= false) and core.bridgeCoverage(live, regs, os.time()) or nil,
+    tabBridge = (core.config(cfg, "tabBridge.enabled", true) ~= false) and core.tabBridgeCoverage(live, regs, os.time()) or nil,
     jq = hasTool("jq"),
     hooksWired = hooksWired, hooksTotal = #core.OUR_HOOK_SCRIPTS,
     scriptsInstalled = exists(CLAUDE_DIR .. "/cc-status.sh") and exists(CLAUDE_DIR .. "/cc-approve.sh"),
@@ -2558,15 +2558,15 @@ end
 -- command in <dir>/<pid>.in/ and reads the answer from <dir>/<pid>.out/. The tab is named
 -- the way the Claude extension names it (core.claudeTabLabel) and the bridge acts only on
 -- a single match -- never a keystroke. State on FX: the main chunk is at the local cap.
-FX.BRIDGE_DIR = os.getenv("CC_BRIDGE_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-bridge")
-FX.BRIDGE_ANSWER_WAIT = 10   -- seconds before an unanswered close is withdrawn
-FX._bridgePending = {}       -- command id -> { key, hw, label, name, at }
+FX.TAB_BRIDGE_DIR = os.getenv("CC_BRIDGE_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-bridge")
+FX.TAB_BRIDGE_ANSWER_WAIT = 10   -- seconds before an unanswered close is withdrawn
+FX._tabBridgePending = {}       -- command id -> { key, hw, label, name, at }
 FX._closeTabWhy = {}         -- session key -> why its last Close couldn't go to the bridge
 
-function FX.bridgeRegistry(hostPid)
+function FX.tabBridgeRegistry(hostPid)
   local hw = tostring(hostPid or "")
   if not hw:match("^%d+$") then return nil end
-  local raw = FX.readFile(FX.BRIDGE_DIR .. "/" .. hw .. ".json")
+  local raw = FX.readFile(FX.TAB_BRIDGE_DIR .. "/" .. hw .. ".json")
   if not raw then return nil end
   local ok, reg = pcall(function() return core.json.decode(raw) end)
   return (ok and type(reg) == "table") and reg or nil
@@ -2587,7 +2587,7 @@ function FX.sessionTabLabel(it)
 end
 
 -- Ask the bridge in this session's window to close its tab. true = the command went out
--- (the card goes when the bridge confirms, in FX.bridgePollResults); false = refused
+-- (the card goes when the bridge confirms, in FX.tabBridgePollResults); false = refused
 -- before anything was sent, with an alert saying why.
 function FX.closeTab(it)
   if type(it) ~= "table" or it.remote or it.editor == "kitty" then return false end
@@ -2598,52 +2598,52 @@ function FX.closeTab(it)
     pcall(function() hs.alert.show("Can't close " .. name .. "'s tab: " .. why) end)
     return false
   end
-  if core.config(loadConfig(), "bridge.enabled", true) == false then
-    return refuse("the Shepherd bridge is switched off (bridge.enabled)")
+  if core.config(loadConfig(), "tabBridge.enabled", true) == false then
+    return refuse("the Shepherd tab bridge is switched off (tabBridge.enabled)")
   end
   local hw = tostring(it.host_window or "")
   local label = FX.sessionTabLabel(it)
-  local ok, why = core.bridgeCloseVerdict(FX.bridgeRegistry(hw), label, FX.now())
+  local ok, why = core.tabBridgeCloseVerdict(FX.tabBridgeRegistry(hw), label, FX.now())
   if not ok then return refuse(why) end
-  local cmd = core.bridgeCommand(it.key, label, FX.now())
-  local file = FX.BRIDGE_DIR .. "/" .. hw .. ".in/" .. cmd.id .. ".json"
+  local cmd = core.tabBridgeCommand(it.key, label, FX.now())
+  local file = FX.TAB_BRIDGE_DIR .. "/" .. hw .. ".in/" .. cmd.id .. ".json"
   if not FX.writeFileAtomic(file, core.json.encode(cmd)) then
     return refuse("couldn't write to the bridge's inbox")
   end
-  FX._bridgePending[cmd.id] = { key = it.key, hw = hw, label = label, name = name, at = FX.now() }
-  print("[cc-dashboard] 🚀 asked the Shepherd bridge (host " .. hw .. ") to close the tab \"" .. label .. "\" (" .. name .. ")")
-  if not FX._bridgeTimer then
-    FX._bridgeTimer = hs.timer.doEvery(0.5, function()
-      FX.bridgePollResults()
-      if next(FX._bridgePending) == nil and FX._bridgeTimer then FX._bridgeTimer:stop(); FX._bridgeTimer = nil end
+  FX._tabBridgePending[cmd.id] = { key = it.key, hw = hw, label = label, name = name, at = FX.now() }
+  print("[cc-dashboard] 🚀 asked the Shepherd tab bridge (host " .. hw .. ") to close the tab \"" .. label .. "\" (" .. name .. ")")
+  if not FX._tabBridgeTimer then
+    FX._tabBridgeTimer = hs.timer.doEvery(0.5, function()
+      FX.tabBridgePollResults()
+      if next(FX._tabBridgePending) == nil and FX._tabBridgeTimer then FX._tabBridgeTimer:stop(); FX._tabBridgeTimer = nil end
     end)
   end
   return true
 end
 
 -- Collect the bridge's answers: ok -> the tab is gone, drop the card; refused -> say why;
--- no answer within FX.BRIDGE_ANSWER_WAIT -> withdraw the command so it can't fire late.
-function FX.bridgePollResults()
-  for id, p in pairs(FX._bridgePending) do
-    local resFile = FX.BRIDGE_DIR .. "/" .. p.hw .. ".out/" .. id .. ".json"
+-- no answer within FX.TAB_BRIDGE_ANSWER_WAIT -> withdraw the command so it can't fire late.
+function FX.tabBridgePollResults()
+  for id, p in pairs(FX._tabBridgePending) do
+    local resFile = FX.TAB_BRIDGE_DIR .. "/" .. p.hw .. ".out/" .. id .. ".json"
     local raw = FX.readFile(resFile)
     if raw then
       os.remove(resFile)
-      FX._bridgePending[id] = nil
+      FX._tabBridgePending[id] = nil
       local ok, res = pcall(function() return core.json.decode(raw) end)
       if ok and type(res) == "table" and res.ok == true then
-        print("[cc-dashboard] ✅ the Shepherd bridge closed '" .. p.name .. "' (tab \"" .. p.label .. "\")")
+        print("[cc-dashboard] ✅ the Shepherd tab bridge closed '" .. p.name .. "' (tab \"" .. p.label .. "\")")
         FX.removeStatus(p.key)
       else
         local why = (ok and type(res) == "table" and res.reason) or "no reason given"
-        print("[cc-dashboard] ❌ the Shepherd bridge didn't close '" .. p.name .. "': " .. tostring(why))
+        print("[cc-dashboard] ❌ the Shepherd tab bridge didn't close '" .. p.name .. "': " .. tostring(why))
         pcall(function() hs.alert.show("Couldn't close " .. p.name .. "'s tab: " .. tostring(why)) end)
       end
-    elseif FX.now() - (p.at or 0) >= FX.BRIDGE_ANSWER_WAIT then
-      os.remove(FX.BRIDGE_DIR .. "/" .. p.hw .. ".in/" .. id .. ".json")
-      FX._bridgePending[id] = nil
-      print("[cc-dashboard] ⚠️ the Shepherd bridge (host " .. p.hw .. ") didn't answer -- close of '" .. p.name .. "' withdrawn")
-      pcall(function() hs.alert.show("The Shepherd bridge didn't answer, so " .. p.name .. "'s tab is still open.") end)
+    elseif FX.now() - (p.at or 0) >= FX.TAB_BRIDGE_ANSWER_WAIT then
+      os.remove(FX.TAB_BRIDGE_DIR .. "/" .. p.hw .. ".in/" .. id .. ".json")
+      FX._tabBridgePending[id] = nil
+      print("[cc-dashboard] ⚠️ the Shepherd tab bridge (host " .. p.hw .. ") didn't answer -- close of '" .. p.name .. "' withdrawn")
+      pcall(function() hs.alert.show("The Shepherd tab bridge didn't answer, so " .. p.name .. "'s tab is still open.") end)
     end
   end
 end

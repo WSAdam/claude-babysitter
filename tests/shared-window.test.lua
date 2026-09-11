@@ -26,6 +26,9 @@ local MAIN, OTHER = T .. "/repo", T .. "/other"
 os.execute('mkdir -p "' .. T .. '/status" "' .. T .. '/.claude" "' .. MAIN .. '" "' .. OTHER .. '"')
 local now = os.time()
 local function write(path, s) local f = io.open(path, "w"); f:write(s); f:close() end
+-- 2026-09-11: Adam's real config -- the SSH remote bridge off (its default). The tab bridge's
+-- switch first shared that `bridge.enabled` key, so this switched Close-by-tab off.
+write(T .. "/.claude/cc-config.json", '{"bridge":{"enabled":false,"intervalSeconds":2}}')
 for _, s in ipairs({ { "a1", MAIN, "500", "501" }, { "a2", MAIN, "500", "502" }, { "b1", OTHER, "600", "601" } }) do
   write(T .. "/status/" .. s[1] .. ".json", string.format(
     '{"status":"done","session_id":"%s","name":"%s","cwd":"%s","since":%d,"updated":%d,"editor":"vscode","host_window":"%s","session_pid":"%s"}',
@@ -173,7 +176,7 @@ check("...one close command, by the name the tab shows  (label=" .. tostring(cmd
 check("...with no focus and no keystroke", focusCalls == 0 and taps == 0)
 check("...and the card stays until the bridge confirms", exists(T .. "/status/a2.json"))
 write(BR .. "/500.out/" .. tostring(cmd.id) .. ".json", json.encode({ v = 1, id = cmd.id, ok = true }))
-quiet(function() fx.bridgePollResults() end)
+quiet(function() fx.tabBridgePollResults() end)
 check("once the bridge confirms the tab closed, the card goes", not exists(T .. "/status/a2.json"))
 check("...and the result is cleaned up", not exists(BR .. "/500.out/" .. tostring(cmd.id) .. ".json"))
 
@@ -201,8 +204,8 @@ registry({ "Twin", "Solo" })
 write(T .. "/a1.jsonl", '{"type":"ai-title","aiTitle":"Solo","sessionId":"a1"}\n')
 alerts = {}
 quiet(function() return core.handleAction(fx, a1, "close") end)
-for _, p in pairs(fx._bridgePending or {}) do p.at = p.at - 60 end
-quiet(function() fx.bridgePollResults() end)
+for _, p in pairs(fx._tabBridgePending or {}) do p.at = p.at - 60 end
+quiet(function() fx.tabBridgePollResults() end)
 check("a bridge that never answers -> the card stays and an alert says so",
       exists(T .. "/status/a1.json") and table.concat(alerts, " "):find("didn't answer", 1, true) ~= nil)
 check("...and the unanswered command is withdrawn", #inbox() == 0)
