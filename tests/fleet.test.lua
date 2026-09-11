@@ -151,10 +151,21 @@ tick()
 I = items()
 check("the card now says it's driving  (" .. tostring(I.drv.fleet.line) .. ")", I.drv.fleet.line == "⇉ driving 2 units in A · merges delegated")
 
--- the driver asks for unit alpha's tab
+-- the driver asks for unit alpha's tab. FX.openClaudeTab is asynchronous (it may have to open the
+-- window first); the test plays its part and says when the tab was actually opened.
+local opened = {}
+fx.openClaudeTab = function(o) opened[#opened + 1] = o; return true end
 write(FD .. "/b1.tab-alpha.json", json.encode({ v = 1, batch = "b1", slug = "alpha", session_id = "drv", nonce = "t-alpha", at = os.time() }))
 tick()
 check("a tab request starts opening the unit's tab", fx._fleetState.b1 and fx._fleetState.b1.units.alpha and fx._fleetState.b1.units.alpha.opening)
+check("...through FX.openClaudeTab, told to report back", opened[1] and type(opened[1].onDone) == "function" and type(opened[1].beforeOpen) == "function")
+-- 2026-09-11 live: Shepherd had to open the repo's window, VS Code restored its old Claude tabs, one
+-- resumed its session -- and that session was taken for the unit although its tab never opened.
+write(SD .. "/4999.json", json.encode({ pid = 4999, sessionId = "restored", name = "A-old", cwd = "/r/A" }))
+quiet(function() fx.fleetTabPoll("b1", "alpha") end)
+check("a session that resumes before the unit's tab has opened is not the unit's",
+      read(FD .. "/b1.tab-alpha.answer") == nil and not (fx._fleetState.b1.units.alpha or {}).session)
+quiet(function() opened[1].beforeOpen(); opened[1].onDone(true) end)
 write(SD .. "/5001.json", json.encode({ pid = 5001, sessionId = "ua", name = "A-a1", cwd = "/r/A" }))
 quiet(function() fx.fleetTabPoll("b1", "alpha") end)
 local a = decoded(FD .. "/b1.tab-alpha.answer")
@@ -205,6 +216,21 @@ for _, c in ipairs(inboxCmds()) do if c.op == "close" then cl = c end end
 check("a unit's nameless tab is closed by its tag, not by a name  (unit=" .. tostring(cl and cl.unit) .. ")",
       sentClose == true and cl and cl.unit == "b1:alpha" and cl.label == nil)
 os.execute('rm -f "' .. BR .. '/701.in/"*')
+
+-- 2026-09-11 live: the unit's tab never opened ("window wasn't in front"), yet a new session in the
+-- repo was recorded as the unit's. A tab that didn't open answers the driver with why.
+write(FD .. "/b1.tab-beta.json", json.encode({ v = 1, batch = "b1", slug = "beta", session_id = "drv", nonce = "t-beta0", at = os.time() }))
+tick()
+local ob = opened[#opened]
+check("unit beta's tab is being opened", ob and ob.label and tostring(ob.label):find("beta", 1, true) ~= nil)
+write(SD .. "/5002.json", json.encode({ pid = 5002, sessionId = "stray", name = "A-stray", cwd = "/r/A" }))
+quiet(function() ob.onDone(false, "its window wasn't in front") end)
+quiet(function() fx.fleetTabPoll("b1", "beta") end)
+local ab0 = decoded(FD .. "/b1.tab-beta.answer")
+check("a unit tab that didn't open is refused, with the reason  (" .. tostring(ab0 and ab0.reason) .. ")",
+      ab0 and ab0.ok == false and ab0.nonce == "t-beta0" and tostring(ab0.reason):find("wasn't in front", 1, true) ~= nil)
+check("...and no session is recorded for it", not ((fx._fleetState.b1.units or {}).beta or {}).session)
+os.remove(FD .. "/b1.tab-beta.answer")
 
 -- Stop
 quiet(function() fx.batchStop("drv", "b1") end)

@@ -2853,19 +2853,35 @@ end
 -- new session. One tab opening per repo at a time, so two new sessions can't be confused.
 function FX.fleetOpenTab(b, slug, req)
   local state = FX.fleetState(b.id)
-  FX._fleetTabs[b.id .. "|" .. slug] = { before = FX.readSessions(), at = FX.now(), nonce = req.nonce, repo = b.repo }
+  local key = b.id .. "|" .. slug
+  local t = { at = FX.now(), nonce = req.nonce, repo = b.repo }
+  FX._fleetTabs[key] = t
   state.units[slug] = state.units[slug] or {}
   state.units[slug].opening = FX.now()
   FX.saveFleetState(b.id)
-  -- The unit's tab never gets a name (its task arrives by message), so the window's tab bridge
-  -- is told to EXPECT it: it tags the next Claude tab it sees open with the unit's tag.
-  local host = FX.fleetRepoHost(b.repo)
-  if host then
-    local cmd = core.tabBridgeCommand("expect-" .. slug, nil, FX.now(), "expect", core.fleetUnitTag(b.id, slug))
-    FX.writeFileAtomic(FX.TAB_BRIDGE_DIR .. "/" .. host .. ".in/" .. cmd.id .. ".json", core.json.encode(cmd))
-  end
   print("[cc-dashboard] 🚀 opening unit " .. slug .. "'s tab for batch " .. b.id .. " in " .. b.repo)
-  pcall(function() FX.openClaudeTab({ root = b.repo, editor = "vscode", prompt = "", label = "unit " .. slug }) end)
+  -- 2026-09-11 live: when Shepherd had to open the repo's window first, VS Code restored its old
+  -- Claude tabs, one resumed its session, and that session was taken for the unit although the
+  -- unit's tab never opened. So the "before" snapshot is taken right before the URI goes out, and
+  -- only a session that starts after it -- once the tab is confirmed open -- can be the unit's.
+  local ok = false
+  pcall(function() ok = FX.openClaudeTab({ root = b.repo, editor = "vscode", prompt = "", label = "unit " .. slug, quiet = true,
+    beforeOpen = function()
+      t.before = FX.readSessions()
+      -- The unit's tab never gets a name (its task arrives by message), so the window's tab bridge
+      -- is told to EXPECT it: it tags the next Claude tab it sees open with the unit's tag. Sent
+      -- now, when the window surely exists (it may only just have been opened).
+      local host = FX.fleetRepoHost(b.repo)
+      if host then
+        local cmd = core.tabBridgeCommand("expect-" .. slug, nil, FX.now(), "expect", core.fleetUnitTag(b.id, slug))
+        FX.writeFileAtomic(FX.TAB_BRIDGE_DIR .. "/" .. host .. ".in/" .. cmd.id .. ".json", core.json.encode(cmd))
+      end
+    end,
+    onDone = function(sent, why)
+      if FX._fleetTabs[key] ~= t then return end
+      if sent then t.sent = FX.now() else t.failed = tostring(why or "the tab didn't open") end
+    end }) end)
+  if not ok then t.failed = "Shepherd couldn't start opening the tab" end
   if not FX._fleetTimer then
     FX._fleetTimer = hs.timer.doEvery(1, function()
       for key in pairs(FX._fleetTabs) do
@@ -2890,6 +2906,14 @@ function FX.fleetTabPoll(id, slug)
     FX.fleetAnswer(id, slug, body)
   end
   if not b then return finish({ nonce = t.nonce, ok = false, reason = "the batch is gone" }) end
+  if t.failed then return finish({ nonce = t.nonce, ok = false, reason = "the unit's tab didn't open: " .. t.failed }) end
+  if not t.sent then
+    -- still opening (the window may be starting): the tab isn't there, so no session is its yet
+    if FX.now() - t.at >= FX.FLEET_TAB_WAIT + 45 then
+      return finish({ nonce = t.nonce, ok = false, reason = "the unit's tab never opened (is the repo's VS Code window open?)" })
+    end
+    return
+  end
   local s, why = core.newTabSession(t.before, FX.readSessions(), t.repo)
   if s then
     local host, ppid = FX.fleetRepoHost(t.repo), nil
@@ -2904,7 +2928,7 @@ function FX.fleetTabPoll(id, slug)
     return finish({ nonce = t.nonce, ok = true, name = s.name, sessionId = s.sessionId, pid = tostring(s.pid),
                     message = core.fleetUnitMessage(b, unit) })
   end
-  if (why and why:find("at once", 1, true)) or FX.now() - t.at >= FX.FLEET_TAB_WAIT then
+  if (why and why:find("at once", 1, true)) or FX.now() - t.sent >= FX.FLEET_TAB_WAIT then
     return finish({ nonce = t.nonce, ok = false, reason = why and why:find("at once", 1, true) and why
                     or "the new tab's session never appeared (is the repo's VS Code window open?)" })
   end
@@ -4636,7 +4660,10 @@ end
 -- the URI goes out -- anything else opens nothing. With no window for the root yet, the
 -- folder is opened and its window awaited like a cold spawn (core.coldStartStep).
 -- Serialized on the injection tail (it moves focus). Presses no key.
--- opts = { root, editor, prompt, label }. Returns true once the attempt is scheduled.
+-- opts = { root, editor, prompt, label, beforeOpen, onDone, quiet }. Returns true once the attempt
+-- is scheduled; the outcome comes later (2026-09-11): beforeOpen() runs right before the URI goes
+-- out, then onDone(true), or onDone(false, why) when nothing was opened. quiet = no "check the
+-- prompt" alert (a batch unit's tab gets its task by message).
 function FX.openClaudeTab(opts)
   opts = type(opts) == "table" and opts or {}
   local root = type(opts.root) == "string" and opts.root ~= "" and core.normDir(opts.root) or nil
@@ -4645,19 +4672,24 @@ function FX.openClaudeTab(opts)
   local name = root:match("([^/]+)$") or root
   local label = tostring(opts.label or name)
   local match = { ancestors = false }
+  local function done(ok, why)
+    if type(opts.onDone) == "function" then pcall(opts.onDone, ok, why) end
+  end
   local function send()
     local w = hs.window.focusedWindow()
     local title = w and w:title() or ""
     if not (w and core.pickWindow({ title }, name, root, os.getenv("USER"), { editor = editor, ancestors = false })) then
       print("[cc-dashboard] new tab: " .. name .. "'s window wasn't in front -- nothing opened")
       FX.alert("New Claude tab not opened: " .. label .. "'s window wasn't in front")
-      return
+      return done(false, name .. "'s window wasn't in front when the tab would open")
     end
     local app = w:application()
     local uri = core.claudeTabUri(app and app:bundleID() or nil, opts.prompt, editor)
+    if type(opts.beforeOpen) == "function" then pcall(opts.beforeOpen) end
     print("[cc-dashboard] new tab in " .. name)
     hs.urlevent.openURL(uri)
-    FX.alert("New Claude tab in " .. label .. " — check the prompt and press Return")
+    if not opts.quiet then FX.alert("New Claude tab in " .. label .. " — check the prompt and press Return") end
+    done(true)
   end
   dispatchSerialized({ editor = editor }, "new-tab", function()
     if focusProject(name, root, editor, false, match) then
@@ -4680,6 +4712,7 @@ function FX.openClaudeTab(opts)
       else
         print("[cc-dashboard] new tab: " .. name .. "'s window never appeared -- nothing opened")
         FX.alert("New Claude tab not opened: " .. label .. "'s window never appeared")
+        done(false, name .. "'s window never appeared")
       end
     end
     after(2.0, poll)
