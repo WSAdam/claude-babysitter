@@ -59,11 +59,13 @@ and the README's "Testing & development" section.
 - Keystrokes go to a window, not a tab: effects refuse a session whose window hosts others
   (`it.sharedWindow`, `core.keystrokeBlocked`). Build every target with `FX.targetFor(it)`,
   and make a new automatic sender skip blocked sessions up front so it can't retry every tick.
-- The tab bridge (`vscode-bridge/`, plain JS, no deps) has exactly two ops, both by name and
-  single-match only: close (`FX.closeTab`, the strict label `core.claudeTabLabel`) and select
-  (`FX.selectTab` after a Jump, any of `core.claudeTabCandidates`). Never add another op, and
-  never use the Claude URI to reveal a tab (D-14). Bump its `package.json` version with every
-  change, or `make install` won't reinstall it; running windows pick it up after a reload.
+- The tab bridge (`vscode-bridge/`, plain JS, no deps) has exactly three ops, all single-match
+  only: close (`FX.closeTab`, the strict label `core.claudeTabLabel`), select (`FX.selectTab`
+  after a Jump, any of `core.claudeTabCandidates`), and expect (tag the next Claude tab that opens
+  as a batch unit's -- those tabs never get a name, so close/select take `unit` instead of a
+  label for them; a window reload forgets the tags). Never add another op, and never use the
+  Claude URI to reveal a tab (D-14). Bump its `package.json` version with every change, or
+  `make install` won't reinstall it; running windows pick it up after a reload.
 - The tab bridge's switch is `tabBridge.*`; plain `bridge.*` is the SSH remote bridge
   (`FX.bridgeSync`). Keep the two apart in config keys, names and wording.
 - Ready to merge is its own channel (`cc-merge.sh`, `~/.claude/cc-merge/`), not the approval

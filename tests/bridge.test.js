@@ -104,6 +104,7 @@ const liveGroups = [
 const closed = [];
 const subs = [];
 const executed = [];
+const tabListeners = [];
 const GROUP_CMDS = ["First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth"]
   .map((n) => "workbench.action.focus" + n + "EditorGroup");
 let focusedGroup = 0;
@@ -131,7 +132,7 @@ const fakeVscode = {
         liveGroups[0].tabs = liveGroups[0].tabs.filter((t) => t !== tab);
         return true;
       },
-      onDidChangeTabs: () => ({ dispose() {} }),
+      onDidChangeTabs: (cb) => { tabListeners.push(cb); return { dispose() {} }; },
       onDidChangeTabGroups: () => ({ dispose() {} }),
     },
     createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
@@ -205,7 +206,45 @@ Module._load = realLoad;
   await ext._test.processInbox();
   check("select: two tabs sharing the name -> refused, no command run", (result("s2") || {}).ok === false && executed.length === 0);
   check("select: no tab with the name -> refused", (result("s3") || {}).ok === false);
-  eq("the registry reports the bridge's version", JSON.parse(fs.readFileSync(regFile, "utf8")).version, "0.2.0");
+  eq("the registry reports the bridge's version", JSON.parse(fs.readFileSync(regFile, "utf8")).version, "0.3.0");
+
+  // 2026-09-11: a tab Shepherd opens for a batch unit never gets a name (its task arrives by
+  // message, so no chat title) -- every such tab reads "Claude Code". The bridge remembers the
+  // tab it opened for the unit instead: "expect" tags the next Claude tab that opens.
+  liveGroups.length = 0;
+  liveGroups.push(groupOf({ viewColumn: 1, tabs: [claudeTab("Claude Code", true)] }));
+  send({ v: 1, id: "e1", op: "expect", unit: "b1:cheer", at: at() });
+  await ext._test.processInbox();
+  check("expect: accepted", (result("e1") || {}).ok === true);
+  const fresh = claudeTab("Claude Code");
+  liveGroups[0].tabs.push(fresh);
+  tabListeners.forEach((cb) => cb({ opened: [fresh], closed: [], changed: [] }));
+  ext._test.writeRegistry();
+  const tagged = JSON.parse(fs.readFileSync(regFile, "utf8")).tabs.filter((t) => t.unit === "b1:cheer");
+  check("expect: the next Claude tab to open is remembered as that unit's", tagged.length === 1);
+  const later = claudeTab("Claude Code");
+  liveGroups[0].tabs.push(later);
+  tabListeners.forEach((cb) => cb({ opened: [later], closed: [], changed: [] }));
+  ext._test.writeRegistry();
+  eq("expect: ...only that one tab", JSON.parse(fs.readFileSync(regFile, "utf8")).tabs.filter((t) => t.unit).length, 1);
+  executed.length = 0;
+  send({ v: 1, id: "u1", op: "select", unit: "b1:cheer", at: at() });
+  await ext._test.processInbox();
+  check("select by unit: brings that exact tab forward though three tabs share the name",
+        (result("u1") || {}).ok === true && fresh.isActive === true && executed.length === 2);
+  const closedBefore = closed.length;
+  send({ v: 1, id: "u2", op: "close", unit: "b1:cheer", at: at() });
+  await ext._test.processInbox();
+  check("close by unit: closes that exact tab", (result("u2") || {}).ok === true && closed.length === closedBefore + 1
+        && liveGroups[0].tabs.indexOf(fresh) < 0 && liveGroups[0].tabs.indexOf(later) >= 0);
+  send({ v: 1, id: "u3", op: "close", unit: "b1:cheer", at: at() });
+  await ext._test.processInbox();
+  check("close by unit: once it's gone, refused", (result("u3") || {}).ok === false);
+  check("command: expect needs a unit", !lib.validateCommand({ v: 1, id: "x", op: "expect", at: Math.floor(Date.now() / 1000) }, Date.now()).ok);
+  check("command: close by unit is accepted without a label",
+        lib.validateCommand({ v: 1, id: "x", op: "close", unit: "b1:cheer", at: Math.floor(Date.now() / 1000) }, Date.now()).ok === true);
+  check("command: a unit tag with odd characters is refused",
+        !lib.validateCommand({ v: 1, id: "x", op: "close", unit: "b1 cheer/..", at: Math.floor(Date.now() / 1000) }, Date.now()).ok);
 
   ext.deactivate();
   check("deactivate removes the registry (Shepherd stops trusting this window)", !fs.existsSync(regFile));

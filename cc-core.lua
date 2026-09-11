@@ -705,11 +705,27 @@ function M.tabBridgeCloseVerdict(reg, label, now)
   return true
 end
 
--- A bridge command: close (default) or select, by label. The id becomes a file name in its outbox.
-function M.tabBridgeCommand(key, label, now, op)
+-- A bridge command: close (default), select or expect -- by label, or by unit tag (a batch
+-- unit's tab, which the bridge tagged when it saw it open). The id becomes a file name.
+function M.tabBridgeCommand(key, label, now, op, unit)
   local safe = tostring(key or "s"):gsub("[^%w._-]", "_"):sub(1, 40)
-  return { v = 1, id = safe .. "-" .. tostring(math.floor(tonumber(now) or 0)), op = (op == "select") and "select" or "close",
-           label = label, at = math.floor(tonumber(now) or 0) }
+  return { v = 1, id = safe .. "-" .. tostring(math.floor(tonumber(now) or 0)),
+           op = (op == "select" or op == "expect") and op or "close",
+           label = (unit == nil) and label or nil, unit = unit, at = math.floor(tonumber(now) or 0) }
+end
+
+-- A batch unit's tab tag: "<batch id>:<slug>" (what the bridge's "expect" hands out).
+function M.fleetUnitTag(batchId, slug) return tostring(batchId) .. ":" .. tostring(slug) end
+
+-- May the bridge close/select this unit's tab? A fresh registry with exactly one tab tagged for it.
+function M.tabBridgeUnitVerdict(reg, unit, now)
+  if type(reg) ~= "table" or type(reg.tabs) ~= "table" then return false, "the Shepherd tab bridge isn't running in its VS Code window" end
+  if (tonumber(now) or 0) - (tonumber(reg.at) or 0) > M.TAB_BRIDGE_FRESH then return false, "the Shepherd tab bridge in its VS Code window stopped reporting" end
+  local n = 0
+  for _, t in ipairs(reg.tabs) do if type(t) == "table" and t.unit == unit then n = n + 1 end end
+  if n == 1 then return true end
+  if n == 0 then return false, "no tab in its window is tagged as unit " .. tostring(unit) .. " (a window reload forgets the tags)" end
+  return false, n .. " tabs claim unit " .. tostring(unit)
 end
 
 -- Which name to ask the bridge to bring forward: the first of the session's possible tab names
@@ -753,7 +769,11 @@ function M.tablessKeys(list, registries, labels, now)
   for _, w in pairs(byHost) do
     local tabs, ntabs = {}, 0
     for _, t in ipairs(w.reg.tabs) do
-      if type(t) == "table" and type(t.label) == "string" then tabs[t.label] = true; ntabs = ntabs + 1 end
+      if type(t) == "table" and type(t.label) == "string" then
+        tabs[t.label] = true
+        if type(t.unit) == "string" then tabs["unit:" .. t.unit] = true end   -- a batch unit's tab
+        ntabs = ntabs + 1
+      end
     end
     local surplus = #w.members - ntabs
     if surplus > 0 then

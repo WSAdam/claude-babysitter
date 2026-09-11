@@ -9114,6 +9114,23 @@ do
   check("...doesn't need him, and the units show their sessions", v.needsYou == false and v.units[1].session == "main-a1")
   eq("card: stopped", core.batchView(b, { approved = true, stopped = true }, state).line, "⇉ batch stopped: Two helpers")
   eq("tier: a batch proposal needs you", core.instanceTier({ key = "drv", status = "done", since = 1, fleet = core.batchView(b, nil, {}) }, {}), 1)
+
+  -- 2026-09-11 E2E: the tabs Shepherd opened for units never got a name (their task arrived by
+  -- message, so no chat title) -- three tabs read "Claude Code" and cheer's tab couldn't be
+  -- closed after its merge. The bridge tags the tab it saw open for a unit; Shepherd targets it.
+  local ureg = { at = 995, tabs = { { label = "Claude Code" }, { label = "Claude Code", unit = "b1:cheer" }, { label = "Claude Code" } } }
+  check("unit tab: the one tab tagged for the unit is found though every tab reads Claude Code",
+        core.tabBridgeUnitVerdict(ureg, "b1:cheer", 1000) == true)
+  local uok, uwhy = core.tabBridgeUnitVerdict(ureg, "b1:wave", 1000)
+  check("unit tab: no tab tagged for it -> refused  (" .. tostring(uwhy) .. ")", uok == false)
+  check("unit tab: a stale registry -> refused", core.tabBridgeUnitVerdict({ at = 1, tabs = ureg.tabs }, "b1:cheer", 1000) == false)
+  local uc = core.tabBridgeCommand("k", nil, 5, "close", "b1:cheer")
+  check("unit tab: the command names the unit, not a label", uc.unit == "b1:cheer" and uc.label == nil and uc.op == "close")
+  eq("unit tab: the batch unit's tag", core.fleetUnitTag("b1", "cheer"), "b1:cheer")
+  local tlist = { { key = "u1", editor = "vscode", host_window = "9" }, { key = "u2", editor = "vscode", host_window = "9" } }
+  local treg = { ["9"] = { at = 995, tabs = { { label = "Claude Code", unit = "b1:cheer" } } } }
+  local tl2 = core.tablessKeys(tlist, treg, { u1 = { "Claude Code", "unit:b1:cheer" }, u2 = { "Old chat" } }, 1000)
+  check("tab-less: a unit's session matches its tagged tab, so only the other one is tab-less", not tl2.u1 and tl2.u2 == true)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

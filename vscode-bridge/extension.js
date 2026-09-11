@@ -28,6 +28,9 @@ let version = "0";
 let out = null;
 let writeTimer = null, heartbeat = null, poller = null, watcher = null;
 let busy = false;
+const EXPECT_MS = 90000;
+const unitTags = new WeakMap();   // tab -> unit tag ("<batch>:<slug>"): tabs this bridge saw open for a unit
+let expecting = null;             // { unit, until }: tag the next Claude tab that opens
 
 function log(msg) { if (out) out.appendLine(new Date().toISOString() + " " + msg); }
 
@@ -37,7 +40,22 @@ function writeAtomic(file, text) {
   fs.renameSync(tmp, file);
 }
 
-function snapshot() { return lib.claudeTabs(vscode.window.tabGroups.all); }
+function snapshot() { return lib.claudeTabs(vscode.window.tabGroups.all, (t) => unitTags.get(t)); }
+
+// A tab opened while Shepherd is expecting one becomes that unit's tab (it never gets a name).
+function onTabsChanged(e) {
+  if (expecting && e && Array.isArray(e.opened)) {
+    if (Date.now() > expecting.until) expecting = null;
+    for (const tab of e.opened) {
+      if (expecting && lib.isClaudeTab(tab) && !unitTags.has(tab)) {
+        unitTags.set(tab, expecting.unit);
+        log("✅ the new Claude tab is unit " + expecting.unit);
+        expecting = null;
+      }
+    }
+  }
+  scheduleWrite();
+}
 
 function writeRegistry() {
   try {
@@ -84,9 +102,15 @@ async function processInbox() {
         answer(id, { ok: false, reason: v.error });
         continue;
       }
-      const pick = lib.pickExactlyOne(snapshot(), v.cmd.label);
+      if (v.cmd.op === "expect") {
+        expecting = { unit: v.cmd.unit, until: Date.now() + EXPECT_MS };
+        log("🔍 expecting a new Claude tab for unit " + v.cmd.unit);
+        answer(id, { ok: true });
+        continue;
+      }
+      const pick = v.cmd.unit ? lib.pickUnit(snapshot(), v.cmd.unit) : lib.pickExactlyOne(snapshot(), v.cmd.label);
       if (!pick.hit) {
-        log("⚠️ didn't close \"" + v.cmd.label + "\": " + pick.reason);
+        log("⚠️ didn't " + v.cmd.op + " \"" + (v.cmd.unit || v.cmd.label) + "\": " + pick.reason);
         answer(id, { ok: false, reason: pick.reason });
         continue;
       }
@@ -96,8 +120,8 @@ async function processInbox() {
         try {
           for (const c of cmds) await vscode.commands.executeCommand(c.id, ...c.args);
           const g = vscode.window.tabGroups.activeTabGroup;
-          const front = !!(g && g.activeTab && g.activeTab.label === v.cmd.label);
-          log((front ? "✅ brought forward" : "⚠️ couldn't bring forward") + " the Claude tab \"" + v.cmd.label + "\"");
+          const front = !!(g && g.activeTab && (g.activeTab === pick.hit.tab || (!v.cmd.unit && g.activeTab.label === v.cmd.label)));
+          log((front ? "✅ brought forward" : "⚠️ couldn't bring forward") + " the Claude tab \"" + (v.cmd.unit || v.cmd.label) + "\"");
           answer(id, front ? { ok: true } : { ok: false, reason: "VS Code didn't bring the tab to the front" });
         } catch (e) {
           answer(id, { ok: false, reason: "select failed: " + e.message });
@@ -106,10 +130,10 @@ async function processInbox() {
       }
       try {
         const closed = await vscode.window.tabGroups.close(pick.hit.tab);
-        log((closed ? "✅ closed" : "⚠️ VS Code kept") + " the Claude tab \"" + v.cmd.label + "\"");
+        log((closed ? "✅ closed" : "⚠️ VS Code kept") + " the Claude tab \"" + (v.cmd.unit || v.cmd.label) + "\"");
         answer(id, closed ? { ok: true } : { ok: false, reason: "VS Code kept the tab open" });
       } catch (e) {
-        log("❌ close failed for \"" + v.cmd.label + "\": " + e.message);
+        log("❌ close failed for \"" + (v.cmd.unit || v.cmd.label) + "\": " + e.message);
         answer(id, { ok: false, reason: "close failed: " + e.message });
       }
     }
@@ -143,7 +167,7 @@ function activate(context) {
   log("🚀 Shepherd bridge " + version + " up in extension host " + PID);
   writeRegistry();
   context.subscriptions.push(
-    vscode.window.tabGroups.onDidChangeTabs(scheduleWrite),
+    vscode.window.tabGroups.onDidChangeTabs(onTabsChanged),
     vscode.window.tabGroups.onDidChangeTabGroups(scheduleWrite),
     vscode.workspace.onDidChangeWorkspaceFolders(scheduleWrite),
     { dispose: stop },

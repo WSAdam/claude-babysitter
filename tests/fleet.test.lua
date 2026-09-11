@@ -160,6 +160,19 @@ check("...and the message to send it", a and type(a.message) == "string" and a.m
 st = decoded(FD .. "/b1.state.json")
 check("Shepherd remembers which session is unit alpha", st and st.units and st.units.alpha and st.units.alpha.session and st.units.alpha.session.id == "ua")
 
+-- 2026-09-11 E2E: a unit's tab never gets a name (its task arrives by message), so Shepherd tells
+-- the window's bridge to EXPECT it before opening it: the bridge tags the tab it sees open.
+local function inboxCmds()
+  local out, p = {}, io.popen('ls -1 "' .. BR .. '/701.in" 2>/dev/null')
+  if p then for n in p:lines() do out[#out + 1] = decoded(BR .. "/701.in/" .. n) or {}; end; p:close() end
+  return out
+end
+local exp
+for _, c in ipairs(inboxCmds()) do if c.op == "expect" then exp = c end end
+check("opening a unit's tab first tells its window's bridge to expect it  (unit=" .. tostring(exp and exp.unit) .. ")",
+      exp and exp.unit == "b1:alpha")
+os.execute('rm -f "' .. BR .. '/701.in/"*')
+
 -- unit alpha finishes and asks to merge: approved on the batch's grant
 status("ua", "/r/A/.claude/worktrees/alpha", "5001")
 facts("/r/A/.claude/worktrees/alpha", "feat/alpha")
@@ -177,6 +190,17 @@ local md = decoded(MD .. "/ua.decision")
 check("a delegated unit's ready merge is approved on the batch's grant", md and md.verdict == "merge" and md.nonce == "m-ua")
 check("...and says so", alerted("on your batch grant") >= 1)
 check("a session that isn't the unit's never merges on the grant (it waits for Adam)", read(MD .. "/zz.decision") == nil)
+
+-- closing unit alpha's tab: it reads "Claude Code" like the others, but its bridge tagged it
+write(BR .. "/701.json", json.encode({ v = 1, pid = 701, version = "0.3.0", folders = { "/r/A" }, at = os.time(),
+  tabs = { { label = "Claude Code", unit = "b1:alpha" }, { label = "Claude Code" }, { label = "Claude Code" } } }))
+local ua = items().ua
+local sentClose = ua and select(2, quiet(function() return fx.closeTab(ua, { quiet = true }) end))
+local cl
+for _, c in ipairs(inboxCmds()) do if c.op == "close" then cl = c end end
+check("a unit's nameless tab is closed by its tag, not by a name  (unit=" .. tostring(cl and cl.unit) .. ")",
+      sentClose == true and cl and cl.unit == "b1:alpha" and cl.label == nil)
+os.execute('rm -f "' .. BR .. '/701.in/"*')
 
 -- Stop
 quiet(function() fx.batchStop("drv", "b1") end)

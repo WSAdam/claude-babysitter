@@ -2615,10 +2615,14 @@ function FX.closeTab(it, opts)
     return refuse("the Shepherd tab bridge is switched off (tabBridge.enabled)")
   end
   local hw = tostring(it.host_window or "")
-  local label = FX.sessionTabLabel(it)
-  local ok, why = core.tabBridgeCloseVerdict(FX.tabBridgeRegistry(hw), label, FX.now())
+  -- a batch unit's tab is targeted by the tag its bridge gave it (it never gets a name)
+  local unit = FX.fleetUnitTagOf(it)
+  local label = unit and ("unit " .. unit) or FX.sessionTabLabel(it)
+  local ok, why
+  if unit then ok, why = core.tabBridgeUnitVerdict(FX.tabBridgeRegistry(hw), unit, FX.now())
+  else ok, why = core.tabBridgeCloseVerdict(FX.tabBridgeRegistry(hw), label, FX.now()) end
   if not ok then return refuse(why) end
-  local cmd = core.tabBridgeCommand(it.key, label, FX.now())
+  local cmd = core.tabBridgeCommand(it.key, label, FX.now(), "close", unit)
   local file = FX.TAB_BRIDGE_DIR .. "/" .. hw .. ".in/" .. cmd.id .. ".json"
   if not FX.writeFileAtomic(file, core.json.encode(cmd)) then
     return refuse("couldn't write to the bridge's inbox")
@@ -2799,6 +2803,22 @@ function FX.batchStop(driverKey, id)
   return true
 end
 
+-- The unit tag ("<batch>:<slug>") of the batch unit this session is, if it is one.
+function FX.fleetUnitTagOf(it)
+  if type(it) ~= "table" then return nil end
+  for id, b in pairs(FX._fleetBatches or {}) do
+    local state = FX.fleetState(id)
+    for _, u in ipairs(b.units) do
+      local us = state.units[u.slug]
+      if type(us) == "table" and type(us.session) == "table"
+         and (us.session.id == it.session_id or us.session.id == it.key) then
+        return core.fleetUnitTag(id, u.slug)
+      end
+    end
+  end
+  return nil
+end
+
 -- The batch (if any) whose grant lets this merge request through on its own.
 function FX.fleetDelegates(r)
   for id, b in pairs(FX._fleetBatches or {}) do
@@ -2818,6 +2838,13 @@ function FX.fleetOpenTab(b, slug, req)
   state.units[slug] = state.units[slug] or {}
   state.units[slug].opening = FX.now()
   FX.saveFleetState(b.id)
+  -- The unit's tab never gets a name (its task arrives by message), so the window's tab bridge
+  -- is told to EXPECT it: it tags the next Claude tab it sees open with the unit's tag.
+  local host = FX.fleetRepoHost(b.repo)
+  if host then
+    local cmd = core.tabBridgeCommand("expect-" .. slug, nil, FX.now(), "expect", core.fleetUnitTag(b.id, slug))
+    FX.writeFileAtomic(FX.TAB_BRIDGE_DIR .. "/" .. host .. ".in/" .. cmd.id .. ".json", core.json.encode(cmd))
+  end
   print("[cc-dashboard] 🚀 opening unit " .. slug .. "'s tab for batch " .. b.id .. " in " .. b.repo)
   pcall(function() FX.openClaudeTab({ root = b.repo, editor = "vscode", prompt = "", label = "unit " .. slug }) end)
   if not FX._fleetTimer then
@@ -2965,12 +2992,20 @@ function FX.selectTab(it)
   if type(it) ~= "table" or it.remote or it.editor == "kitty" or it.editor == "terminal" then return false end
   if core.config(loadConfig(), "tabBridge.enabled", true) == false then return false end
   local hw = tostring(it.host_window or "")
-  local label, why = core.tabBridgeSelectLabel(FX.tabBridgeRegistry(hw), FX.sessionTabCandidates(it), FX.now())
+  local unit = FX.fleetUnitTagOf(it)
+  local label, why
+  if unit then
+    local ok
+    ok, why = core.tabBridgeUnitVerdict(FX.tabBridgeRegistry(hw), unit, FX.now())
+    label = ok and ("unit " .. unit) or nil
+  else
+    label, why = core.tabBridgeSelectLabel(FX.tabBridgeRegistry(hw), FX.sessionTabCandidates(it), FX.now())
+  end
   if not label then
     print("[cc-dashboard] ⚠️ no tab select for '" .. tostring(it.label or it.name) .. "': " .. tostring(why))
     return false
   end
-  local cmd = core.tabBridgeCommand(it.key, label, FX.now(), "select")
+  local cmd = core.tabBridgeCommand(it.key, label, FX.now(), "select", unit)
   if not FX.writeFileAtomic(FX.TAB_BRIDGE_DIR .. "/" .. hw .. ".in/" .. cmd.id .. ".json", core.json.encode(cmd)) then return false end
   FX._tabBridgePending[cmd.id] = { op = "select", key = it.key, hw = hw, label = label,
                                    name = tostring(it.label or it.name or "?"), at = FX.now() }
@@ -2994,7 +3029,17 @@ function FX.annotateTabless(list, cfg)
   for hw, r in pairs(regs) do if r == false then regs[hw] = nil end end
   if next(regs) == nil then return end
   for _, it in ipairs(list or {}) do
-    if it.host_window and regs[tostring(it.host_window)] then labels[it.key] = FX.cachedTabCandidates(it) end
+    if it.host_window and regs[tostring(it.host_window)] then
+      local names = FX.cachedTabCandidates(it)
+      local unit = FX.fleetUnitTagOf(it)   -- a batch unit's tab is known by its tag, not a name
+      if unit then
+        local copy = {}
+        for _, n in ipairs(names or {}) do copy[#copy + 1] = n end
+        copy[#copy + 1] = "unit:" .. unit
+        names = copy
+      end
+      labels[it.key] = names
+    end
   end
   local now, raw, live = FX.now(), core.tablessKeys(list, regs, labels, FX.now()), {}
   for _, it in ipairs(list or {}) do
@@ -3165,15 +3210,22 @@ function FX.mergeAutoClose(r, it)
   if not v.ok then return "close its tab yourself once you've looked: " .. tostring(v.why) end
   if not core.mergeCloseDue(it, now) then return nil end
   local reg = FX.tabBridgeRegistry(it.host_window)
+  -- retry only when the window's tabs change (a heartbeat alone changes nothing), or every 5 min
+  local sig = "none"
+  if type(reg) == "table" and type(reg.tabs) == "table" then
+    local parts = {}
+    for _, tb in ipairs(reg.tabs) do parts[#parts + 1] = tostring(tb.label) .. "#" .. tostring(tb.unit) end
+    sig = table.concat(parts, "|")
+  end
   local t = FX._mergeCloseTry[r.nonce]
-  if t and now - t.at < 30 and (reg and reg.at) == t.regAt then return t.why end
+  if t and now - t.at < 300 and sig == t.sig then return t.why end
   local sent, why = FX.closeTab(it, { quiet = true })
   if sent then
     FX._mergeClosing[r.nonce] = true
     FX._mergeCloseTry[r.nonce] = nil
     return nil
   end
-  FX._mergeCloseTry[r.nonce] = { at = now, regAt = reg and reg.at, why = "close its tab yourself: " .. tostring(why) }
+  FX._mergeCloseTry[r.nonce] = { at = now, sig = sig, why = "close its tab yourself: " .. tostring(why) }
   return FX._mergeCloseTry[r.nonce].why
 end
 

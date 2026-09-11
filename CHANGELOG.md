@@ -4,6 +4,22 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — A batch unit's tab is known without a name
+
+### Fixed — tabs opened for batch units could never be closed or focused
+
+In the first batch run, cheer merged on its grant but its tab stayed open: every tab Shepherd opened
+for a unit read "Claude Code", because a unit's task arrives by message and such a chat never gets a
+title — and the tab bridge closes by name, on a single match only. The bridge (0.3.0) takes a third
+command, `expect`: Shepherd sends it (with the unit's tag, `<batch>:<slug>`) right before opening a
+unit's tab, and the bridge tags the next Claude tab it sees open. The registry reports the tag;
+close and select for a unit's session target the tag instead of a name; the tab-less check counts a
+tagged tab as its unit's. A window reload forgets the tags (Close then falls back to the name).
+Also: a refused auto-close re-logged every 15 s (each bridge heartbeat) — it now retries only when the
+window's tabs change, or every 5 minutes. Fixtures: `tests/bridge.test.js` (expect tags only the
+next tab; select and close by unit though three tabs share a name), `tests/core.test.lua` and
+`tests/fleet.test.lua` (expect sent before the tab opens; close by tag) — red before.
+
 ## 2026-09-11 — A unit asks to merge from outside its worktree
 
 ### Fixed — Claude Code's worktree guard refused the merge request inside a fenced tab
