@@ -708,6 +708,47 @@ function M.tabBridgeCommand(key, label, now)
            label = label, at = math.floor(tonumber(now) or 0) }
 end
 
+-- ---- Tab-less sessions (2026-09-11) -----------------------------------------------
+-- Starting a new conversation in a Claude tab can leave the old session's claude process
+-- running with no tab. In a window whose tab bridge is reporting, a local VS Code session
+-- whose tab name is known and matches none of the window's Claude tabs is tab-less.
+-- Nameless sessions, stale or missing registries, kitty/terminal/remote are never judged.
+-- `labels` = key -> the session's tab label (core.claudeTabLabel) or nil. key -> true.
+function M.tablessKeys(list, registries, labels, now)
+  local out = {}
+  for _, it in ipairs(list or {}) do
+    local hw = type(it) == "table" and it.host_window and tostring(it.host_window) or ""
+    local reg = hw ~= "" and type(registries) == "table" and registries[hw] or nil
+    local label = type(labels) == "table" and labels[it.key] or nil
+    if not it.remote and it.editor ~= "kitty" and it.editor ~= "terminal"
+       and type(reg) == "table" and type(reg.tabs) == "table"
+       and (tonumber(now) or 0) - (tonumber(reg.at) or 0) <= M.TAB_BRIDGE_FRESH
+       and type(label) == "string" and label ~= "" then
+      local found = false
+      for _, t in ipairs(reg.tabs) do if type(t) == "table" and t.label == label then found = true end end
+      if not found then out[it.key] = true end
+    end
+  end
+  return out
+end
+
+function M.endSessionPsCmd(pid) return "ps -o ppid=,command= -p " .. tostring(pid) end
+
+-- May End session stop this process? Only a tab-less session whose pid is still a claude
+-- process whose parent is its own window's extension host. ok, reason, gone (already exited).
+function M.endSessionVerdict(it, psOut)
+  if type(it) ~= "table" or not it.tabless then return false, "it has a tab in its window -- close that tab instead" end
+  local pid = tostring(it.session_pid or "")
+  if not pid:match("^%d+$") then return false, "its process id isn't known" end
+  local line = type(psOut) == "string" and psOut:match("^%s*(.-)%s*$") or ""
+  if line == "" then return false, "the process has already exited", true end
+  local ppid, cmd = line:match("^(%d+)%s+(.+)$")
+  if not ppid then return false, "ps gave an unexpected answer" end
+  if ppid ~= tostring(it.host_window or "") then return false, "that process belongs to another window now" end
+  if not cmd:find("claude", 1, true) then return false, "that process isn't claude any more" end
+  return true
+end
+
 -- Doctor: the VS Code windows hosting sessions (by host_window) vs the ones with a fresh
 -- bridge registry. Kitty and remote tiles have no VS Code window here. `registries` maps
 -- host pid -> decoded registry (or nil). Returns { windows, covered, missing = {names} }.
@@ -1115,6 +1156,7 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
       wtRoot = it.wtRoot, branch = it.branch, detached = it.detached, isMainWt = it.isMainWt,
       editor = it.editor, pendingSummary = (it.status == "approval") and ps or nil,
       bgActive = it.bg_active and true or nil,
+      tabless = it.tabless and true or nil,
       -- ready to merge: just what the row shows (the review lives in the detail panel)
       merge = (type(it.merge) == "table") and { phase = it.merge.phase, line = it.merge.line,
         needsYou = it.merge.needsYou, ready = it.merge.ready, queued = it.merge.queued, sent = it.merge.sent } or nil,

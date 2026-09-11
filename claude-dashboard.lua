@@ -2660,6 +2660,75 @@ function FX.tabBridgePollResults()
   end
 end
 
+-- ---- Tab-less sessions (2026-09-11) -----------------------------------------------
+-- A claude process left running with no tab (a new conversation started in its tab) is
+-- marked it.tabless once the mismatch has held for FX.TABLESS_AFTER seconds (a tab's name
+-- can lag its session's title briefly). It still counts toward the shared window -- it could
+-- be the Claude sidebar -- but the card says so and offers End session.
+FX.TABLESS_AFTER = 20
+FX._tablessSince = {}
+FX._tabLabels = {}   -- key -> { label, at }: a transcript grep + tail at most every 30s
+
+function FX.cachedTabLabel(it)
+  local c, now = FX._tabLabels[it.key], FX.now()
+  if c and now - c.at < 30 then return c.label end
+  local label = FX.sessionTabLabel(it)
+  FX._tabLabels[it.key] = { label = label, at = now }
+  return label
+end
+
+function FX.annotateTabless(list, cfg)
+  for _, it in ipairs(list or {}) do it.tabless = nil end
+  if core.config(cfg, "tabBridge.enabled", true) == false then return end
+  local regs, labels = {}, {}
+  for _, it in ipairs(list or {}) do
+    local hw = it.host_window and tostring(it.host_window) or ""
+    if hw ~= "" and not it.remote and regs[hw] == nil then regs[hw] = FX.tabBridgeRegistry(hw) or false end
+  end
+  for hw, r in pairs(regs) do if r == false then regs[hw] = nil end end
+  if next(regs) == nil then return end
+  for _, it in ipairs(list or {}) do
+    if it.host_window and regs[tostring(it.host_window)] then labels[it.key] = FX.cachedTabLabel(it) end
+  end
+  local now, raw, live = FX.now(), core.tablessKeys(list, regs, labels, FX.now()), {}
+  for _, it in ipairs(list or {}) do
+    live[it.key] = true
+    if raw[it.key] then
+      FX._tablessSince[it.key] = FX._tablessSince[it.key] or now
+      if now - FX._tablessSince[it.key] >= FX.TABLESS_AFTER then it.tabless = true end
+    else
+      FX._tablessSince[it.key] = nil
+    end
+  end
+  for k in pairs(FX._tablessSince) do if not live[k] then FX._tablessSince[k] = nil end end
+end
+
+-- End session: stop a tab-less session's leftover claude process (the webview confirms first).
+-- Checked with ps right before the signal; its chat stays in its transcript.
+function FX.endSession(key)
+  local it
+  for _, x in ipairs(FX._shownItems or {}) do if x.key == key then it = x end end
+  for _, x in ipairs(FX._hiddenItems or {}) do if x.key == key then it = x end end
+  if not it then return false end
+  local name = tostring(it.label or it.name or "?")
+  local psOut
+  if tostring(it.session_pid or ""):match("^%d+$") then
+    pcall(function() psOut = hs.execute(core.endSessionPsCmd(it.session_pid)) end)
+  end
+  local ok, why, gone = core.endSessionVerdict(it, psOut)
+  if not ok then
+    print("[cc-dashboard] ⚠️ End session refused for '" .. name .. "': " .. tostring(why))
+    if gone then FX.removeStatus(key); return true end
+    pcall(function() hs.alert.show("Won't end " .. name .. ": " .. tostring(why)) end)
+    return false
+  end
+  pcall(function() hs.execute("kill -TERM " .. tostring(it.session_pid)) end)
+  print("[cc-dashboard] ✅ ended the tab-less session '" .. name .. "' (pid " .. tostring(it.session_pid) .. ")")
+  pcall(function() hs.alert.show("Ended " .. name .. "'s leftover session -- its chat is saved") end)
+  FX.removeStatus(key)
+  return true
+end
+
 -- ---- Ready to merge (2026-09-11) --------------------------------------------------
 -- cc-merge.sh (a worktree tab waiting in the background) writes <MERGE_DIR>/<key>.json.
 -- Shepherd reads it with its OWN git (core.mergeFactsCmd, cached per request), puts the
@@ -5762,6 +5831,7 @@ local function handleBridgeMsg(msg)
   if a == "merge-approve" then FX.mergeApprove(tostring(payload.v or "")); return end
   if a == "merge-hold" then FX.mergeHold(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "merge-diff" then FX.mergeDiff(tostring(payload.v or "")); return end
+  if a == "end-session" then FX.endSession(tostring(payload.v or "")); return end   -- tab-less only (verdict in core)
   if a == "open-hidden-view" then
     -- The restore list. Sends only what the row needs to identify a session --
     -- never a prompt body (the panel's audit view owns content, this doesn't).
@@ -7361,6 +7431,7 @@ local HTML = [[
      red escalate ring still wins when a tile is somehow both. */
   .tile.hung { box-shadow:0 0 0 2px var(--purple), 0 0 10px var(--purple); }
   .tile.escalate { box-shadow:0 0 0 2px var(--danger), 0 0 12px var(--danger); }
+  #d-tabless { display:none; margin:6px 0; padding:6px 10px; border:1px dashed var(--warn); border-radius:8px; font-size:12px; }
   /* a merge request waiting for you (or one that came back blocked) */
   .tile.merge { box-shadow:0 0 0 2px #14b8a6, 0 0 10px #14b8a6; }
   #d-merge { display:none; margin:6px 0; padding:8px 10px; border:1px solid #14b8a6; border-radius:8px; font-size:12px; }
@@ -8497,6 +8568,7 @@ local HTML = [[
       <span id="d-status"></span>
     </div>
     <div id="d-shared"></div>
+    <div id="d-tabless"><span id="dt-text"></span> <button id="b-endsess" onclick="endSessionFor(selectedKey)" title="Stop this leftover claude process (asks first)">End session</button></div>
     <!-- Ready to merge (2026-09-11): a fixed skeleton that renderMerge fills with
          textContent only; the note input is never rebuilt, so a half-typed note survives. -->
     <div id="d-merge">
@@ -12217,6 +12289,10 @@ local HTML = [[
     // Everything in it.merge was written by a session, so it goes in through textContent
     // only. The note input and the diff pane are never rebuilt by a re-render.
     var MERGE_DIFF = { key: null, text: "" };
+    // ---- Tab-less sessions (2026-09-11): a claude process with no tab in its window ----
+    var TABLESS_T = "⊘ no tab — a leftover process, or the Claude sidebar";
+    var END_CONFIRM = "End this session's leftover claude process? It has no tab in its VS Code window. Its chat is saved and can be resumed.";
+    function endSessionFor(k){ if(k && confirm(END_CONFIRM)) send("end-session", k); }
     function mergeFactsLine(m){
       var parts = [];
       if(m.ahead > 0) parts.push(m.ahead + " commit" + (m.ahead === 1 ? "" : "s") + " ahead of " + (m.base || "main"));
@@ -12377,6 +12453,12 @@ local HTML = [[
         dsh.style.display = shared ? "block" : "none";
       }
       renderMerge(it);
+      var dtl = document.getElementById("d-tabless");
+      if(dtl){
+        dtl.style.display = it.tabless ? "block" : "none";
+        document.getElementById("dt-text").textContent = it.tabless
+          ? "⊘ No tab in its VS Code window — a leftover process (a new conversation was started in its tab), or the Claude sidebar." : "";
+      }
       var bdeny = document.getElementById("b-deny");
       lockCtl(bdeny, (remote && !remoteWait) ? REMOTE_T : ((shared && !gateWait) ? SHARED_T : ""));
       // Errored session: the Approve button becomes Continue (types "continue" + Enter to
@@ -12581,7 +12663,7 @@ local HTML = [[
         var st = /^[a-z]+$/.test(im.status || "") ? im.status : "idle";
         var mg = im.merge || null;   // ready to merge (core.mergeView, trimmed by instancesPayload)
         var needs = st === "approval" || st === "error" || !!im.hung || !!(mg && mg.needsYou);
-        var sub = im.pendingSummary ? "wants: " + im.pendingSummary : ((mg && mg.line) || im.sessTitle || "");
+        var sub = im.pendingSummary ? "wants: " + im.pendingSummary : ((mg && mg.line) || (im.tabless ? TABLESS_T : "") || im.sessTitle || "");
         var canMerge = !!(mg && mg.phase === "requested" && mg.ready && !mg.queued && !mg.sent);
         html += '<div class="in-row' + (needs ? ' needs' : '') + (im.hidden ? ' hid' : '') + '">'
              +   '<span class="in-dot in-st-' + st + '"></span>'
@@ -12599,6 +12681,7 @@ local HTML = [[
              +     (im.hidden
                      ? '<button class="in-btn" data-inact="unhide" data-k="' + esc(im.key) + '">Unhide</button>'
                      : (canMerge ? '<button class="in-btn" data-inact="merge" data-k="' + esc(im.key) + '" title="Merge it (the review is in Details)">⇡ Merge</button>' : '')
+                       + (im.tabless ? '<button class="in-btn" data-inact="end" data-k="' + esc(im.key) + '" title="Stop this leftover claude process (asks first)">End</button>' : '')
                        + '<button class="in-btn" data-inact="focus" data-k="' + esc(im.key) + '">Focus</button>'
                        + '<button class="in-btn" data-inact="details" data-k="' + esc(im.key) + '">' + (mg ? 'Review' : 'Details') + '</button>')
              +   '</div>'
@@ -12653,6 +12736,7 @@ local HTML = [[
         else if(act === "details"){ closeInstances(); selectTile(k); }
         else if(act === "unhide"){ send("unhide-tile", k); }
         else if(act === "merge"){ send("merge-approve", k); }
+        else if(act === "end"){ endSessionFor(k); }
         else if(act === "open"){ INST.opening[k] = Date.now(); send("open-worktree", INST.stackKey, k); renderInstances(true); }
       });
       document.addEventListener("keydown", function(e){
@@ -14545,6 +14629,8 @@ local HTML = [[
              + (it.error_message || "API error — stopped");
       } else if(it.merge && it.merge.line){
         meta = it.merge.line;   // ready to merge / queued / merging / blocked (core.mergeLine)
+      } else if(it.tabless){
+        meta = TABLESS_T;   // a claude process with no tab in its window (2026-09-11)
       }
       if(it.remote){ meta = (meta ? meta + " · " : "") + "⇄ " + (it.remote.host || "remote")
                             + (it.bridgeStale ? " (bridge offline)" : ""); }
@@ -16233,6 +16319,7 @@ function FX._refreshBody()
   -- Ready to merge (2026-09-11): after the stacks (readiness compares the session's current
   -- worktree) and before the stack ranking (a request waiting for Adam leads its card).
   FX.annotateMerges(list, cfg, bannerOn)
+  FX.annotateTabless(list, cfg)   -- a claude process with no tab in its window (2026-09-11)
   -- Two sessions in ONE project used to render as IDENTICAL cards: the name (and
   -- any relabel) is per-projectKey, so nothing on either tile said which chat it
   -- was. Give each of those tiles its own chat title -- and only those, so a

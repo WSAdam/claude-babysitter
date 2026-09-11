@@ -4,6 +4,21 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — Sessions with no tab
+
+### Fixed — a leftover claude process passed for a second tab in its window
+
+Starting a new conversation in a Chargeback Sentinel tab left the old session's `claude` process
+(Nexio rematch) running with no tab. Shepherd counted it: the card showed 2 instances, and the one
+real tab was refused keystrokes as "sharing its window". Now, where the tab bridge reports a window's
+Claude tabs, a session whose tab name has matched none of them for 20 s is marked *no tab* on its
+card, in Instances and in the detail panel, with **End session**: after a confirm, and only if `ps`
+still shows a `claude` process under that window's extension host, it stops the process and drops
+the card. It still counts toward the shared window until then (it could be the Claude sidebar).
+Fixtures: `tests/core.test.lua` (the real case: host 1051, one tab named "Chargeback Sentinel hand…")
+and the behavioral `tests/tabless.test.lua` (End refuses a tabbed session and a foreign pid; ending
+the leftover frees the real tab) — both red before the fix.
+
 ## 2026-09-11 — A merged unit's tab closes itself
 
 ### Added — close the tab after a verified merge

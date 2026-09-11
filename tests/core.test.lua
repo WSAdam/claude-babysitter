@@ -8762,6 +8762,53 @@ do
   eq("window sessions: no folder, none", #core.windowSessionsFor(list, nil), 0)
 end
 
+-- ---- Tab-less sessions: a leftover claude process isn't a second tab (2026-09-11) ------
+-- 2026-09-11: starting a new conversation in a Chargeback Sentinel tab left the old session's
+-- claude process (Nexio rematch, pid 2713) running with no tab. Shepherd counted it: the card
+-- showed 2 instances and the one real tab was refused keystrokes as "sharing its window".
+do
+  local now = 1000
+  local function vs(key, hw, extra)
+    local t = { key = key, name = "ChargebackSentinel", editor = "vscode", host_window = hw, status = "done" }
+    for k, v in pairs(extra or {}) do t[k] = v end
+    return t
+  end
+  local list = { vs("6698", "1051"), vs("957b", "1051"), vs("lone", "2000"), vs("nolabel", "1051"),
+                 vs("stale", "3000"), vs("k", "1051", { editor = "kitty" }), vs("r", "1051", { remote = { host = "x" } }),
+                 vs("t", "1051", { editor = "terminal" }), vs("nobridge", "4000") }
+  local regs = {
+    ["1051"] = { at = 995, tabs = { { label = "Chargeback Sentinel hand…" } } },
+    ["2000"] = { at = 995, tabs = {} },                                  -- its only tab was closed
+    ["3000"] = { at = 100, tabs = {} },                                  -- a bridge that stopped reporting
+  }
+  local labels = { ["6698"] = "Chargeback Sentinel hand…", ["957b"] = "Nexio rematch run 2026-…",
+                   lone = "Old chat", stale = "Anything", k = "x", r = "x", t = "x", nobridge = "x" }
+  local tl = core.tablessKeys(list, regs, labels, now)
+  check("tab-less: the real case -- the Nexio session has no tab in its window", tl["957b"] == true)
+  check("tab-less: ...the tab that's really there isn't", not tl["6698"])
+  check("tab-less: a session whose window has no Claude tab at all", tl.lone == true)
+  check("tab-less: a session with no name yet is never judged", not tl.nolabel)
+  check("tab-less: a stale bridge registry judges nothing", not tl.stale)
+  check("tab-less: no bridge in the window judges nothing", not tl.nobridge)
+  check("tab-less: kitty, terminal and remote sessions are never judged", not tl.k and not tl.t and not tl.r)
+
+  local ps = "1051 /Users/adam/.vscode/extensions/anthropic.claude-code-2.1.268-darwin-arm64/resources/native-binary/claude --output-format stream-json"
+  local it = vs("957b", "1051", { tabless = true, session_pid = "2713" })
+  check("end: a tab-less claude child of its window's host may be ended", core.endSessionVerdict(it, ps) == true)
+  local ok, why = core.endSessionVerdict(vs("6698", "1051", { session_pid = "25135" }), ps)
+  check("end: never a session with a tab  (" .. tostring(why) .. ")", ok == false and why:find("tab", 1, true))
+  ok, why = core.endSessionVerdict(it, "999 /x/native-binary/claude --output-format stream-json")
+  check("end: not a process of another window  (" .. tostring(why) .. ")", ok == false and why:find("window", 1, true))
+  ok, why = core.endSessionVerdict(it, "1051 /bin/zsh")
+  check("end: not a process that isn't claude  (" .. tostring(why) .. ")", ok == false and why:find("claude", 1, true))
+  local gone
+  ok, why, gone = core.endSessionVerdict(it, "")
+  check("end: an exited process is reported gone (the card can go)", ok == false and gone == true)
+  ok = core.endSessionVerdict(vs("x", "1051", { tabless = true, session_pid = "12; rm -rf /" }), ps)
+  check("end: a pid that isn't a number is refused", ok == false)
+  eq("end: the ps check is one plain command", core.endSessionPsCmd("2713"), "ps -o ppid=,command= -p 2713")
+end
+
 -- ---- Ready to merge: a worktree tab asks, Adam approves in Shepherd (2026-09-11) ------
 -- cc-merge.sh writes ~/.claude/cc-merge/<key>.json and waits for a decision bound to its
 -- nonce. Shepherd checks the request with its OWN git (never the session's word), shows a

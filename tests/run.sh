@@ -95,6 +95,9 @@ echo ""
 echo "== lua: no keystrokes into a window shared by several sessions (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/shared-window.test.lua" || fail=1
 echo ""
+echo "== lua: a leftover claude process with no tab is marked, and End stops only it (behavioral, stubbed hs + ps) =="
+HOME="$(mktemp -d)" lua "$DIR/tabless.test.lua" || fail=1
+echo ""
 echo "== lua: ready to merge -- review, one merge per repo, Not yet (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/merge-request.test.lua" || fail=1
 echo ""
