@@ -1173,6 +1173,9 @@ end
 -- 3 hung · 4 finished and not jumped-to since it finished · 5 anything else.
 function M.instanceTier(it, seenAt)
   local st = it and it.status
+  -- 2026-09-11: a question held for Adam (FX.annotateAsks) outranks everything: its answer is
+  -- right on the card, while a merged unit's "close its tab yourself" can wait.
+  if it and it.askHeld then return 0 end
   -- 2026-09-11: a merge request waiting for Adam (or one that came back blocked) needs him
   -- as much as an approval does.
   if it and type(it.merge) == "table" and it.merge.needsYou then return 1 end
@@ -1235,7 +1238,7 @@ end
 local STACK_BUCKETS = { "approval", "error", "hung", "ready", "working", "done", "idle" }
 local function stackBucket(it, seenAt)
   local tier = M.instanceTier(it, seenAt)
-  return (tier == 1 and "approval") or (tier == 2 and "error") or (tier == 3 and "hung")
+  return (tier <= 1 and "approval") or (tier == 2 and "error") or (tier == 3 and "hung")
       or (tier == 4 and "ready") or tostring(it.status or "idle")
 end
 function M.stackInstances(shown, seenAt, prevLeads, hidden)

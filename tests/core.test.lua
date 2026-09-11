@@ -9233,6 +9233,18 @@ do
   local hooked = false
   for _, n in ipairs(core.OUR_HOOK_SCRIPTS) do if n == "cc-ask.sh" then hooked = true end end
   check("cc-ask.sh is one of Shepherd's hooks (the doctor counts it)", hooked)
+
+  -- 2026-09-11 live: a unit's question sat under "also: 2 needing you" because two older merged
+  -- units ("close its tab yourself") ranked the same and the longest-waiting one led the card.
+  local asking = held({ key = "49f0", since = 1789143361, askHeld = true })
+  local cheer = { key = "31a6", status = "done", since = 1789137562, merge = { phase = "merged", needsYou = true } }
+  local wave = { key = "6c66", status = "done", since = 1789140437, merge = { phase = "merged", needsYou = true } }
+  local ranked = core.rankInstances({ cheer, wave, asking }, {})
+  eq("a session asking Adam a question leads its project card over merged units waiting on their tabs",
+     ranked[1] and ranked[1].key, "49f0")
+  local plain = { key = "ap", status = "approval", since = 1 }
+  eq("...and over an older plain approval too (its answer is right on the card)",
+     core.rankInstances({ plain, asking }, {})[1].key, "49f0")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
