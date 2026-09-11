@@ -358,6 +358,11 @@ function FX.refuseShared(target, what)
     .. "': its window hosts " .. n .. " Claude sessions (can't pick the tab)")
   FX._refusedAt = FX._refusedAt or {}
   local k, now = tostring(target.key or name), FX.now()
+  -- A Close that FX.closeTab already refused has shown its own, more specific alert.
+  if what == "close" and FX._closeTabWhy and FX._closeTabWhy[k] then
+    FX._closeTabWhy[k] = nil
+    return true
+  end
   if not FX._refusedAt[k] or now - FX._refusedAt[k] >= 60 then
     FX._refusedAt[k] = now
     pcall(function()
@@ -1141,7 +1146,18 @@ function FX.doctorStatus()
   for _, name in ipairs(FX.readDir(STATUS_DIR)) do
     if name:match("%.json$") then sessions = sessions + 1 end
   end
+  -- The companion extension: which VS Code windows hosting sessions have a live bridge.
+  local live, regs = {}, {}
+  for _, src in ipairs({ FX._shownItems or {}, FX._hiddenItems or {} }) do
+    for _, it in ipairs(src) do
+      live[#live + 1] = it
+      local hw = it.host_window and tostring(it.host_window)
+      if hw and regs[hw] == nil then regs[hw] = FX.bridgeRegistry(hw) or false end
+    end
+  end
+  for hw, r in pairs(regs) do if r == false then regs[hw] = nil end end
   return core.doctorChecks({
+    bridge = (core.config(cfg, "bridge.enabled", true) ~= false) and core.bridgeCoverage(live, regs, os.time()) or nil,
     jq = hasTool("jq"),
     hooksWired = hooksWired, hooksTotal = #core.OUR_HOOK_SCRIPTS,
     scriptsInstalled = exists(CLAUDE_DIR .. "/cc-status.sh") and exists(CLAUDE_DIR .. "/cc-approve.sh"),
@@ -2534,6 +2550,102 @@ function FX.removeStatus(key)
   os.remove(POLICY_DIR .. "/" .. key)
   os.remove(POLICY_OVERRIDE_DIR .. "/" .. key)
   os.remove((os.getenv("CC_AUTOMODEL_DIR") or (home .. "/.claude/cc-automodel")) .. "/" .. key)
+end
+
+-- ---- Companion extension: close an exact Claude tab (2026-09-11) -----------------
+-- vscode-bridge/ runs in every VS Code window's extension host (pid == host_window) and
+-- writes <dir>/<pid>.json listing that window's Claude tabs; Shepherd drops a close
+-- command in <dir>/<pid>.in/ and reads the answer from <dir>/<pid>.out/. The tab is named
+-- the way the Claude extension names it (core.claudeTabLabel) and the bridge acts only on
+-- a single match -- never a keystroke. State on FX: the main chunk is at the local cap.
+FX.BRIDGE_DIR = os.getenv("CC_BRIDGE_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-bridge")
+FX.BRIDGE_ANSWER_WAIT = 10   -- seconds before an unanswered close is withdrawn
+FX._bridgePending = {}       -- command id -> { key, hw, label, name, at }
+FX._closeTabWhy = {}         -- session key -> why its last Close couldn't go to the bridge
+
+function FX.bridgeRegistry(hostPid)
+  local hw = tostring(hostPid or "")
+  if not hw:match("^%d+$") then return nil end
+  local raw = FX.readFile(FX.BRIDGE_DIR .. "/" .. hw .. ".json")
+  if not raw then return nil end
+  local ok, reg = pcall(function() return core.json.decode(raw) end)
+  return (ok and type(reg) == "table") and reg or nil
+end
+
+-- The label this session's tab shows. A rename (custom-title) can sit far behind the
+-- tail, so those records come from a grep of the whole transcript; the AI title is
+-- re-appended as the chat evolves, so the tail has the newest one.
+function FX.sessionTabLabel(it)
+  local path = it and it.transcript_path
+  if type(path) ~= "string" or path == "" then return nil end
+  local custom
+  pcall(function()
+    local q = "'" .. path:gsub("'", "'\\''") .. "'"
+    custom = hs.execute("grep -F '\"type\":\"custom-title\"' " .. q .. " 2>/dev/null | tail -n 3")
+  end)
+  return core.claudeTabLabel(core.claudeTabTitle(custom, FX.readTail(path, 131072)))
+end
+
+-- Ask the bridge in this session's window to close its tab. true = the command went out
+-- (the card goes when the bridge confirms, in FX.bridgePollResults); false = refused
+-- before anything was sent, with an alert saying why.
+function FX.closeTab(it)
+  if type(it) ~= "table" or it.remote or it.editor == "kitty" then return false end
+  local name = tostring(it.label or it.name or "?")
+  local function refuse(why)
+    FX._closeTabWhy[tostring(it.key)] = why
+    print("[cc-dashboard] ⚠️ Close NOT sent for '" .. name .. "': " .. why)
+    pcall(function() hs.alert.show("Can't close " .. name .. "'s tab: " .. why) end)
+    return false
+  end
+  if core.config(loadConfig(), "bridge.enabled", true) == false then
+    return refuse("the Shepherd bridge is switched off (bridge.enabled)")
+  end
+  local hw = tostring(it.host_window or "")
+  local label = FX.sessionTabLabel(it)
+  local ok, why = core.bridgeCloseVerdict(FX.bridgeRegistry(hw), label, FX.now())
+  if not ok then return refuse(why) end
+  local cmd = core.bridgeCommand(it.key, label, FX.now())
+  local file = FX.BRIDGE_DIR .. "/" .. hw .. ".in/" .. cmd.id .. ".json"
+  if not FX.writeFileAtomic(file, core.json.encode(cmd)) then
+    return refuse("couldn't write to the bridge's inbox")
+  end
+  FX._bridgePending[cmd.id] = { key = it.key, hw = hw, label = label, name = name, at = FX.now() }
+  print("[cc-dashboard] 🚀 asked the Shepherd bridge (host " .. hw .. ") to close the tab \"" .. label .. "\" (" .. name .. ")")
+  if not FX._bridgeTimer then
+    FX._bridgeTimer = hs.timer.doEvery(0.5, function()
+      FX.bridgePollResults()
+      if next(FX._bridgePending) == nil and FX._bridgeTimer then FX._bridgeTimer:stop(); FX._bridgeTimer = nil end
+    end)
+  end
+  return true
+end
+
+-- Collect the bridge's answers: ok -> the tab is gone, drop the card; refused -> say why;
+-- no answer within FX.BRIDGE_ANSWER_WAIT -> withdraw the command so it can't fire late.
+function FX.bridgePollResults()
+  for id, p in pairs(FX._bridgePending) do
+    local resFile = FX.BRIDGE_DIR .. "/" .. p.hw .. ".out/" .. id .. ".json"
+    local raw = FX.readFile(resFile)
+    if raw then
+      os.remove(resFile)
+      FX._bridgePending[id] = nil
+      local ok, res = pcall(function() return core.json.decode(raw) end)
+      if ok and type(res) == "table" and res.ok == true then
+        print("[cc-dashboard] ✅ the Shepherd bridge closed '" .. p.name .. "' (tab \"" .. p.label .. "\")")
+        FX.removeStatus(p.key)
+      else
+        local why = (ok and type(res) == "table" and res.reason) or "no reason given"
+        print("[cc-dashboard] ❌ the Shepherd bridge didn't close '" .. p.name .. "': " .. tostring(why))
+        pcall(function() hs.alert.show("Couldn't close " .. p.name .. "'s tab: " .. tostring(why)) end)
+      end
+    elseif FX.now() - (p.at or 0) >= FX.BRIDGE_ANSWER_WAIT then
+      os.remove(FX.BRIDGE_DIR .. "/" .. p.hw .. ".in/" .. id .. ".json")
+      FX._bridgePending[id] = nil
+      print("[cc-dashboard] ⚠️ the Shepherd bridge (host " .. p.hw .. ") didn't answer -- close of '" .. p.name .. "' withdrawn")
+      pcall(function() hs.alert.show("The Shepherd bridge didn't answer, so " .. p.name .. "'s tab is still open.") end)
+    end
+  end
 end
 
 -- Merge fields into a session's status file (optimistic local patch -- e.g. the

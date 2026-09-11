@@ -144,6 +144,11 @@
     "refuseSharedWindow": true
   },
 
+  "bridge": {
+    "_comment": "The Shepherd companion VS Code extension (ON by default; make install puts it in VS Code with its own CLI, no Marketplace). It runs in every VS Code window and closes ONE Claude tab by name through VS Code's tab API -- so Close works on a session that shares its window, with no keystroke, and only when exactly one Claude tab there carries that session's name. false = Close on shared-window sessions stays refused.",
+    "enabled": true
+  },
+
   "drain": {
     "_comment": "Graceful drain (Feature F). OFF by default. Adds a right-click 'Drain (finish turn, then close)' action: instead of closing immediately, it waits for the session to finish the in-flight turn (next done) and then closes. If the session is already idle/done it closes now. Drain wins over queue auto-feed for the same session.",
     "enabled": false

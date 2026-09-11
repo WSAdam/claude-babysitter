@@ -4,6 +4,28 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — The Shepherd bridge: close one exact Claude tab
+
+### Added — a companion VS Code extension, and Close for sessions that share a window
+
+Shepherd types into a window, not a tab, so since the shared-window guard it refused Close on a
+session whose window hosts other Claude tabs (⌘⇧W would close them all) — and nothing outside
+VS Code could close just one: ⌘W hits whichever tab is in front, and the Claude extension's URI
+handler has no close. `vscode-bridge/` is a small extension that runs in every VS Code window's
+extension host — the same process as that window's Claude tabs, so its pid is the session's
+`host_window`. It lists the window's Claude tabs by name in `~/.claude/cc-bridge/<pid>.json` and
+takes one command, close-by-name, through VS Code's tab API. Shepherd names the tab exactly as the
+Claude extension does (custom title, else AI title, cut to 24 UTF-16 units plus "…"; a fresh
+"Claude Code" tab has no name yet) and the bridge acts only when exactly one Claude tab matches.
+Close on a shared-window session now goes there; with no bridge, no name or two tabs sharing it,
+Close stays refused and the alert says why. The card goes once the bridge confirms; an unanswered
+close is withdrawn after 10 s. `make install` builds the `.vsix` with plain `zip` and installs it
+with VS Code's own CLI only on a version bump. Doctor lists windows without the bridge. Fixtures:
+`tests/bridge.test.js` (the real extension against a fake `vscode`), `tests/bridge-build.test.sh`
+(package shape; install through a fake CLI), `tests/core.test.lua` (the label, including the real
+"Claude tabs workflow int…" case) and `tests/shared-window.test.lua` (Close through the bridge, no
+focus, no keystroke).
+
 ## 2026-09-10 — Jump stays window-level (spike: exact-tab reveal dropped)
 
 A spike tried bringing a session's own Claude tab to the front on Jump with the extension's

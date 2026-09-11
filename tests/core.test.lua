@@ -8600,6 +8600,92 @@ do
   eq("guard: ...and still reaches the lone one", sweep[1] and sweep[1].key, "c")
 end
 
+-- ---- Companion extension: close an exact Claude tab (2026-09-11) ------------------
+-- Nothing outside VS Code can close one specific tab (⌘W hits the front one; the Claude
+-- extension's URI has no close), so a tiny companion extension in each window closes a
+-- Claude tab by NAME through VS Code's tab API. The name is the Claude extension's own:
+-- the session's custom title, else its AI title, cut to 24 UTF-16 units + "…" past 25.
+-- Shepherd must compute the same string, and the bridge acts only on exactly one match.
+do
+  local T = '{"type":"ai-title","aiTitle":"Early name","sessionId":"s"}\n'
+         .. '{"type":"user","message":{"content":"quoting {\\"type\\":\\"custom-title\\"} is not a record"}}\n'
+         .. '{"type":"ai-title","aiTitle":"Claude tabs workflow integration","sessionId":"s"}\n'
+  eq("tab title: the last AI title when there's no custom one", core.claudeTabTitle(nil, T), "Claude tabs workflow integration")
+  local C = '{"type":"custom-title","customTitle":"First rename","sessionId":"s"}\n'
+         .. 'garbage {"type":"custom-title"\n'
+         .. '{"type":"custom-title","customTitle":"  Login fix  ","sessionId":"s"}\n'
+  eq("tab title: a custom title beats the AI title, the last one wins, trimmed", core.claudeTabTitle(C, T), "Login fix")
+  eq("tab title: a blank custom title falls back to the AI title",
+     core.claudeTabTitle('{"type":"custom-title","customTitle":"  "}\n', T), "Claude tabs workflow integration")
+  eq("tab title: neither -> nil (a nameless tab is never targeted)", core.claudeTabTitle("", "no records here"), nil)
+
+  -- 2026-09-11 real case: session 5bc91a01's tab reads "Claude tabs workflow int…" in
+  -- VS Code's saved editor state for the AI title "Claude tabs workflow integration".
+  eq("tab label: the real case", core.claudeTabLabel("Claude tabs workflow integration"), "Claude tabs workflow int…")
+  eq("tab label: 25 characters stay whole", core.claudeTabLabel(string.rep("a", 25)), string.rep("a", 25))
+  eq("tab label: 26 characters -> 24 + …", core.claudeTabLabel(string.rep("a", 26)), string.rep("a", 24) .. "…")
+  eq("tab label: short titles are untouched", core.claudeTabLabel("Fix login"), "Fix login")
+  eq("tab label: counts characters, not bytes", core.claudeTabLabel("Überprüfe die Anmeldungsseite"), "Überprüfe die Anmeldungs…")
+  eq("tab label: an emoji counts as two (JS string length)", core.claudeTabLabel("🚀 " .. string.rep("b", 23)), "🚀 " .. string.rep("b", 21) .. "…")
+  eq("tab label: no title, no label", core.claudeTabLabel(nil), nil)
+  eq("tab label: a blank title, no label", core.claudeTabLabel(""), nil)
+
+  local now = 1000
+  local reg = { v = 1, pid = 500, at = 990, tabs = { { label = "Fix login" }, { label = "Claude Code" }, { label = "Claude Code" } } }
+  check("close verdict: exactly one tab with the name", core.bridgeCloseVerdict(reg, "Fix login", now) == true)
+  local ok, why = core.bridgeCloseVerdict(reg, "Claude Code", now)
+  check("close verdict: two tabs share the name -> refused  (" .. tostring(why) .. ")", ok == false and why:find("2 Claude tabs", 1, true))
+  ok, why = core.bridgeCloseVerdict(reg, "Gone", now)
+  check("close verdict: no tab with the name -> refused  (" .. tostring(why) .. ")", ok == false and why:find("no Claude tab named", 1, true))
+  ok, why = core.bridgeCloseVerdict(reg, nil, now)
+  check("close verdict: a nameless session -> refused  (" .. tostring(why) .. ")", ok == false and why:find("no name", 1, true))
+  ok, why = core.bridgeCloseVerdict(nil, "Fix login", now)
+  check("close verdict: no bridge in that window -> refused  (" .. tostring(why) .. ")", ok == false and why:find("isn't running", 1, true))
+  ok, why = core.bridgeCloseVerdict({ v = 1, at = 900, tabs = reg.tabs }, "Fix login", now)
+  check("close verdict: a bridge that stopped reporting -> refused  (" .. tostring(why) .. ")", ok == false and why:find("stopped reporting", 1, true))
+
+  local cmd = core.bridgeCommand("a/b key", "Fix login", 1234)
+  eq("command: close by label", cmd.op .. "|" .. cmd.label .. "|" .. cmd.at .. "|" .. cmd.v, "close|Fix login|1234|1")
+  check("command: its id is safe as a file name  (" .. cmd.id .. ")", cmd.id:match("^[%w._-]+$") ~= nil and #cmd.id <= 64)
+
+  local function vs(extra)
+    local t = { key = "s", name = "s", cwd = "/r/s", editor = "vscode", status = "working", host_window = "500", sharedWindow = 2 }
+    for a, b in pairs(extra or {}) do t[a] = b end
+    return t
+  end
+  local r = newRecorder()
+  local asked = {}
+  r.fx.closeTab = function(item) asked[#asked + 1] = item.key; return true end
+  eq("close on a shared-window session goes to the bridge", core.handleAction(r.fx, vs(), "close"), "close")
+  local touched = false
+  for _, c in ipairs(r.calls) do if c.op ~= "log" then touched = true end end
+  check("...with no keystroke, no ⌘⇧W and no refusal (the card goes once the tab is closed)", asked[1] == "s" and not touched)
+  r = newRecorder()
+  r.fx.closeTab = function() return false end
+  eq("the bridge can't tell the tab apart -> Close is refused as before", core.handleAction(r.fx, vs(), "close"), nil)
+  eq("...and says so", r.last().op, "refuseShared")
+  r = newRecorder()
+  r.fx.closeTab = function() error("closeTab must not be asked for a nudge") end
+  eq("every other keystroke action is still refused", core.handleAction(r.fx, vs(), "nudge", "hi"), nil)
+
+  local list = { vs({ key = "a", host_window = "500" }), vs({ key = "b", host_window = "500" }),
+                 vs({ key = "c", name = "wgsUltra", host_window = "600", sharedWindow = nil }),
+                 vs({ key = "k", editor = "kitty", host_window = "700" }), vs({ key = "r", remote = { host = "x" }, host_window = "800" }) }
+  local cov = core.bridgeCoverage(list, { ["500"] = { at = 995, tabs = {} }, ["600"] = { at = 100, tabs = {} } }, now)
+  eq("coverage: counts the VS Code windows hosting sessions (not kitty or remote)", cov.windows, 2)
+  eq("coverage: a window with a fresh registry has the bridge", cov.covered, 1)
+  eq("coverage: names a window whose bridge is missing or stale", cov.missing[1], "wgsUltra")
+  local rows = core.doctorChecks({ bridge = cov })
+  local row
+  for _, x in ipairs(rows) do if x.label:find("bridge", 1, true) then row = x end end
+  check("doctor: a missing bridge is a warning that says to reload that window",
+        row and row.status == "warn" and row.detail:find("wgsUltra", 1, true) and (row.fix or ""):find("Reload Window", 1, true))
+  rows = core.doctorChecks({ bridge = { windows = 2, covered = 2, missing = {} } })
+  row = nil
+  for _, x in ipairs(rows) do if x.label:find("bridge", 1, true) then row = x end end
+  check("doctor: every window covered is ok", row and row.status == "ok")
+end
+
 -- ---- New worktree tab: a Claude tab that starts its own worktree (2026-09-10) ----
 -- The Claude Code extension's URI handler (vscode://anthropic.claude-code/open?prompt=)
 -- opens a NEW Claude tab in the active window with the prompt typed in, never sent. The

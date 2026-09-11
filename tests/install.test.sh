@@ -10,6 +10,9 @@
 # gate would re-enter `make test` -> run.sh -> this file -> install.sh, unbounded.
 # The gate's own tests near the end clear it per-call to exercise the real thing.
 export CC_INSTALL_SKIP_TESTS=1
+# ...and never hand the companion extension to the real VS Code (bridge-build.test.sh
+# covers packaging + install against a fake CLI).
+export CC_INSTALL_NO_BRIDGE=1
 
 TMP="$(mktemp_dir)"
 trap 'rm -rf "$TMP"' EXIT

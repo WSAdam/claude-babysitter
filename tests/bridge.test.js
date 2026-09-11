@@ -1,0 +1,167 @@
+// bridge.test.js - BEHAVIORAL fixture for the Shepherd companion VS Code extension
+// (vscode-bridge/, 2026-09-11). Shepherd types into a WINDOW, not a tab, and nothing
+// outside VS Code can close one specific tab: ⌘W hits whichever tab is in front and the
+// Claude extension's URI has no close. The bridge runs inside each window's extension
+// host and closes a Claude tab through VS Code's own tab API -- but only when exactly one
+// Claude tab in that window carries the requested name.
+//
+// Runs the pure helpers (vscode-bridge/lib.js), then the REAL extension.js against a fake
+// `vscode` module in a temp CC_BRIDGE_DIR: registry, inbox, close, refusals, cleanup.
+//
+// Usage: node tests/bridge.test.js
+
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const Module = require("module");
+
+let run = 0, failed = 0;
+function check(name, cond) {
+  run++;
+  if (cond) console.log("ok   - " + name);
+  else { failed++; console.log("FAIL - " + name); }
+}
+function eq(name, got, want) { check(name + "  (got=" + JSON.stringify(got) + " want=" + JSON.stringify(want) + ")", got === want); }
+function done() {
+  console.log("-- bridge.test.js: " + run + " run, " + failed + " failed --");
+  process.exit(failed === 0 ? 0 : 1);
+}
+
+const LIB = path.join(__dirname, "..", "vscode-bridge", "lib.js");
+const EXT = path.join(__dirname, "..", "vscode-bridge", "extension.js");
+check("the bridge's pure helpers exist (vscode-bridge/lib.js)", fs.existsSync(LIB));
+check("the bridge's extension entry exists (vscode-bridge/extension.js)", fs.existsSync(EXT));
+if (!fs.existsSync(LIB) || !fs.existsSync(EXT)) done();
+const lib = require(LIB);
+
+// ---- fakes: a Claude tab is a webview tab whose viewType names claudeVSCodePanel ----
+class TabInputWebview { constructor(viewType) { this.viewType = viewType; } }
+class TabInputText { constructor(uri) { this.uri = uri; } }
+const claudeTab = (label, active) => ({ label, isActive: !!active, input: new TabInputWebview("mainThreadWebview-claudeVSCodePanel") });
+
+// ---- pure helpers ----
+check("a Claude panel tab is a Claude tab", lib.isClaudeTab(claudeTab("x")));
+check("a text editor tab is not", !lib.isClaudeTab({ label: "main.lua", input: new TabInputText("/r/main.lua") }));
+check("another extension's webview is not", !lib.isClaudeTab({ label: "Preview", input: new TabInputWebview("mainThreadWebview-markdown.preview") }));
+check("a tab with no input is not", !lib.isClaudeTab({ label: "Settings" }));
+
+const groups = [
+  { viewColumn: 1, tabs: [claudeTab("Fix sibling window", true), { label: "main.lua", input: new TabInputText("/r/main.lua") }] },
+  { viewColumn: 2, tabs: [claudeTab("Claude Code"), claudeTab("Claude Code")] },
+];
+const tabs = lib.claudeTabs(groups);
+eq("claudeTabs keeps only the Claude tabs, across every group", tabs.length, 3);
+eq("...with each tab's label", tabs[0].label, "Fix sibling window");
+eq("...its group", tabs[1].group, 2);
+eq("...and whether it's the active tab of its group", tabs[0].active, true);
+
+const reg = lib.registryFor(1057, tabs, ["/r/main"], "0.1.0", 1757600000123);
+eq("registry: versioned", reg.v, 1);
+eq("registry: names the extension host pid (Shepherd's host_window)", reg.pid, 1057);
+eq("registry: stamped in whole seconds", reg.at, 1757600000);
+eq("registry: lists the window's folders", reg.folders[0], "/r/main");
+check("registry: carries labels, never the live tab objects",
+      reg.tabs.length === 3 && reg.tabs[0].label === "Fix sibling window" && reg.tabs[0].input === undefined);
+
+const now = 1757600000000;
+const good = { v: 1, id: "a1-1757600000", op: "close", label: "Fix sibling window", at: 1757600000 };
+check("command: a fresh close with a label is accepted", lib.validateCommand(good, now).ok === true);
+const bad = [
+  ["not an object", "close"],
+  ["an unknown version", Object.assign({}, good, { v: 2 })],
+  ["any op but close", Object.assign({}, good, { op: "exec" })],
+  ["a missing id", Object.assign({}, good, { id: undefined })],
+  ["an id that could leave the outbox", Object.assign({}, good, { id: "../x" })],
+  ["an empty label", Object.assign({}, good, { label: "" })],
+  ["a runaway label", Object.assign({}, good, { label: "x".repeat(201) })],
+  ["a command older than 30s", Object.assign({}, good, { at: 1757600000 - 31 })],
+  ["a command from the future", Object.assign({}, good, { at: 1757600000 + 60 })],
+];
+for (const [what, cmd] of bad) check("command: refuses " + what, !lib.validateCommand(cmd, now).ok);
+
+check("pick: exactly one tab with the name is picked", lib.pickExactlyOne(tabs, "Fix sibling window").hit === tabs[0]);
+const none = lib.pickExactlyOne(tabs, "Nope");
+check("pick: no tab with the name -> a reason naming it", !none.hit && /no Claude tab named "Nope"/.test(none.reason));
+const two = lib.pickExactlyOne(tabs, "Claude Code");
+check("pick: two tabs share the name -> refused, never the first one", !two.hit && /2 Claude tabs share the name/.test(two.reason));
+
+// ---- the real extension.js against a fake vscode, in a temp bridge dir ----
+const DIR = fs.mkdtempSync(path.join(os.tmpdir(), "cc-bridge-"));
+process.env.CC_BRIDGE_DIR = DIR;
+const liveGroups = [
+  { viewColumn: 1, tabs: [claudeTab("Fix sibling window", true), claudeTab("Claude Code"), claudeTab("Claude Code"),
+                          { label: "main.lua", input: new TabInputText("/r/main.lua") }] },
+];
+const closed = [];
+const subs = [];
+const fakeVscode = {
+  TabInputWebview, TabInputText,
+  window: {
+    tabGroups: {
+      get all() { return liveGroups; },
+      close: async (tab) => {
+        closed.push(tab.label);
+        liveGroups[0].tabs = liveGroups[0].tabs.filter((t) => t !== tab);
+        return true;
+      },
+      onDidChangeTabs: () => ({ dispose() {} }),
+      onDidChangeTabGroups: () => ({ dispose() {} }),
+    },
+    createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
+  },
+  workspace: { workspaceFolders: [{ uri: { fsPath: "/r/main" } }], onDidChangeWorkspaceFolders: () => ({ dispose() {} }) },
+};
+const realLoad = Module._load;
+Module._load = function (request, parent, isMain) {
+  if (request === "vscode") return fakeVscode;
+  return realLoad.apply(this, arguments);
+};
+const ext = require(EXT);
+Module._load = realLoad;
+
+(async () => {
+  const ctx = { subscriptions: subs, extension: { packageJSON: { version: "0.1.0" } } };
+  ext.activate(ctx);
+  const regFile = path.join(DIR, process.pid + ".json");
+  check("activate writes this window's registry, named by the extension host pid", fs.existsSync(regFile));
+  const r = JSON.parse(fs.readFileSync(regFile, "utf8"));
+  eq("...listing its Claude tabs only", r.tabs.length, 3);
+  eq("...and its version", r.version, "0.1.0");
+  const inbox = path.join(DIR, process.pid + ".in"), outbox = path.join(DIR, process.pid + ".out");
+  check("the inbox and outbox exist", fs.existsSync(inbox) && fs.existsSync(outbox));
+  eq("...private to this user (0700)", (fs.statSync(inbox).mode & 0o777).toString(8), "700");
+
+  const send = (cmd) => fs.writeFileSync(path.join(inbox, cmd.id + ".json"), JSON.stringify(cmd));
+  const result = (id) => { try { return JSON.parse(fs.readFileSync(path.join(outbox, id + ".json"), "utf8")); } catch (e) { return null; } };
+  const at = () => Math.floor(Date.now() / 1000);
+
+  send({ v: 1, id: "c1", op: "close", label: "Fix sibling window", at: at() });
+  await ext._test.processInbox();
+  eq("close: the one tab with that name closes", closed.join(","), "Fix sibling window");
+  check("close: the result says so", (result("c1") || {}).ok === true);
+  check("close: the command is consumed", !fs.existsSync(path.join(inbox, "c1.json")));
+
+  send({ v: 1, id: "c2", op: "close", label: "Claude Code", at: at() });
+  await ext._test.processInbox();
+  eq("close: two tabs sharing a name -> nothing closes", closed.length, 1);
+  const r2 = result("c2") || {};
+  check("close: ...and the result explains it", r2.ok === false && /2 Claude tabs share/.test(r2.reason || ""));
+
+  send({ v: 1, id: "c3", op: "exec", label: "Claude Code", at: at() });
+  send({ v: 1, id: "c4", op: "close", label: "Claude Code", at: at() - 120 });
+  await ext._test.processInbox();
+  check("an unknown op is refused and nothing closes", (result("c3") || {}).ok === false && closed.length === 1);
+  check("a stale command is refused and nothing closes", (result("c4") || {}).ok === false && closed.length === 1);
+
+  fs.writeFileSync(path.join(inbox, "junk.json"), "{not json");
+  await ext._test.processInbox();
+  check("garbage in the inbox is dropped, not retried forever", !fs.existsSync(path.join(inbox, "junk.json")));
+
+  ext._test.writeRegistry();
+  eq("the registry follows the closed tab", JSON.parse(fs.readFileSync(regFile, "utf8")).tabs.length, 2);
+
+  ext.deactivate();
+  check("deactivate removes the registry (Shepherd stops trusting this window)", !fs.existsSync(regFile));
+  fs.rmSync(DIR, { recursive: true, force: true });
+  done();
+})().catch((e) => { console.log("FAIL - the extension threw: " + (e && e.stack || e)); failed++; done(); });

@@ -54,6 +54,12 @@ echo ""
 echo "== node: the New worktree tab form (behavioral, runs the shipped form helpers) =="
 node "$DIR/new-tab-form.test.js" || fail=1
 echo ""
+echo "== node: the Shepherd companion VS Code extension (behavioral, the real extension against a fake vscode) =="
+node "$DIR/bridge.test.js" || fail=1
+echo ""
+echo "== bash: the companion extension packages and installs locally (fake VS Code CLI) =="
+bash "$DIR/bridge-build.test.sh" || fail=1
+echo ""
 echo "== bash: CLI-tools viewer wiring tripwire =="
 bash "$DIR/mcpskills-tools.test.sh" || fail=1
 echo ""

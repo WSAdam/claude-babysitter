@@ -56,6 +56,10 @@ and the README's "Testing & development" section.
 - Keystrokes go to a window, not a tab: effects refuse a session whose window hosts others
   (`it.sharedWindow`, `core.keystrokeBlocked`). Build every target with `FX.targetFor(it)`,
   and make a new automatic sender skip blocked sessions up front so it can't retry every tick.
+- Closing ONE tab goes through the companion extension (`vscode-bridge/`, plain JS, no deps):
+  `FX.closeTab` names the tab like the Claude extension does (`core.claudeTabLabel`) and the
+  bridge closes it only on a single match. Never add a bridge op beyond close-by-name. Bump
+  its `package.json` version with every change, or `make install` won't reinstall it.
 - `vscode://anthropic.claude-code/open?prompt=` opens a new Claude tab in the ACTIVE editor
   window, prompt typed in but never sent. Only `FX.openClaudeTab` sends it, after a positive
   window match re-checked right before the URI goes out; never follow it with a keystroke.

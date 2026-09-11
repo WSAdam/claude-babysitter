@@ -36,3 +36,6 @@ Shepherd.app/
 # .claude/worktrees/ and must not show up as untracked noise.
 TODO.md
 .claude/worktrees/
+
+# The companion VS Code extension's packages (make bridge builds them here).
+/build/

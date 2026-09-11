@@ -269,6 +269,10 @@ function M.handleAction(fx, item, action, text)
   -- actions (the gate's decision file) still go through.
   if M.keystrokeBlocked(item) and action ~= "focus" and action ~= "answer"
      and not M.actionIsHeadless(item, action) then
+    -- 2026-09-11: Close has a keystroke-free route -- the companion extension in that
+    -- window closes exactly this session's tab (by name, only on a single match). The
+    -- card goes when the bridge confirms (FX), so nothing else happens here.
+    if action == "close" and fx.closeTab and fx.closeTab(item) then return "close" end
     if fx.refuseShared then fx.refuseShared(item, action) end
     return nil
   end
@@ -621,6 +625,110 @@ function M.aiTitleFromTranscript(text)
     end
   end
   return found
+end
+
+-- ---- Companion extension: close an exact Claude tab (2026-09-11) -----------------
+-- Nothing outside VS Code can close one specific tab, so vscode-bridge/ (a tiny local
+-- extension in every window's extension host -- its pid IS the session's host_window)
+-- closes a Claude tab by NAME through VS Code's tab API. The tab API's only live identity
+-- is the label, so Shepherd computes the label exactly as the Claude extension shows it,
+-- and the bridge acts only when exactly one Claude tab in that window carries it.
+
+-- The title a session's tab shows: the LAST custom title (a rename), else the last AI
+-- title. `customText` is the custom-title records (FX greps the whole transcript -- a
+-- rename can sit far behind the tail), `tailText` the transcript tail. nil = no name yet
+-- (a fresh tab reads "Claude Code"; a nameless session is never targeted).
+function M.claudeTabTitle(customText, tailText)
+  local found = nil
+  if type(customText) == "string" then
+    for line in (customText .. "\n"):gmatch("([^\n]*)\n") do
+      if line:find('"type":"custom-title"', 1, true) then
+        local ok, e = pcall(function() return M.json.decode(line) end)
+        if ok and type(e) == "table" and e.type == "custom-title" and type(e.customTitle) == "string" then
+          local t = e.customTitle:gsub("^%s+", ""):gsub("%s+$", "")
+          if t ~= "" then found = t end
+        end
+      end
+    end
+  end
+  return found or M.aiTitleFromTranscript(tailText)
+end
+
+-- The Claude extension's tab label for a title: its webview sends
+-- `q.length > 25 ? q.substring(0, 24) + "…" : q` -- JS lengths are UTF-16 units, so an
+-- astral character (emoji) counts twice. nil for no title or invalid UTF-8.
+function M.claudeTabLabel(title)
+  if type(title) ~= "string" or title == "" then return nil end
+  local ok, cps = pcall(function()
+    local t = {}
+    for _, cp in utf8.codes(title) do t[#t + 1] = cp end
+    return t
+  end)
+  if not ok then return nil end
+  local units = 0
+  for _, cp in ipairs(cps) do units = units + ((cp >= 0x10000) and 2 or 1) end
+  if units <= 25 then return title end
+  local out, u = {}, 0
+  for _, cp in ipairs(cps) do
+    local w = (cp >= 0x10000) and 2 or 1
+    if u + w > 24 then break end
+    out[#out + 1] = utf8.char(cp)
+    u = u + w
+  end
+  return table.concat(out) .. "…"
+end
+
+M.BRIDGE_FRESH = 45   -- the bridge rewrites its registry every 15s; older = not running
+
+-- May Shepherd ask the bridge to close the tab named `label`? Only when that window's
+-- registry is fresh and exactly one of its Claude tabs carries the name. ok, reason.
+function M.bridgeCloseVerdict(reg, label, now)
+  if type(label) ~= "string" or label == "" then
+    return false, "its tab has no name yet, so it can't be told apart"
+  end
+  if type(reg) ~= "table" or type(reg.tabs) ~= "table" then
+    return false, "the Shepherd bridge isn't running in its VS Code window (Developer: Reload Window there once)"
+  end
+  if (tonumber(now) or 0) - (tonumber(reg.at) or 0) > M.BRIDGE_FRESH then
+    return false, "the Shepherd bridge in its VS Code window stopped reporting"
+  end
+  local n = 0
+  for _, t in ipairs(reg.tabs) do
+    if type(t) == "table" and t.label == label then n = n + 1 end
+  end
+  if n == 0 then return false, "no Claude tab named \"" .. label .. "\" in its window" end
+  if n > 1 then return false, n .. " Claude tabs in its window share the name \"" .. label .. "\"" end
+  return true
+end
+
+-- The one command the bridge takes. The id becomes a file name in its outbox.
+function M.bridgeCommand(key, label, now)
+  local safe = tostring(key or "s"):gsub("[^%w._-]", "_"):sub(1, 40)
+  return { v = 1, id = safe .. "-" .. tostring(math.floor(tonumber(now) or 0)), op = "close",
+           label = label, at = math.floor(tonumber(now) or 0) }
+end
+
+-- Doctor: the VS Code windows hosting sessions (by host_window) vs the ones with a fresh
+-- bridge registry. Kitty and remote tiles have no VS Code window here. `registries` maps
+-- host pid -> decoded registry (or nil). Returns { windows, covered, missing = {names} }.
+function M.bridgeCoverage(list, registries, now)
+  local names, order = {}, {}
+  for _, it in ipairs(list or {}) do
+    if type(it) == "table" and not it.remote and it.editor ~= "kitty" and it.editor ~= "terminal" then
+      local hw = it.host_window and tostring(it.host_window) or ""
+      if hw ~= "" and not names[hw] then names[hw] = tostring(it.name or hw); order[#order + 1] = hw end
+    end
+  end
+  local covered, missing = 0, {}
+  for _, hw in ipairs(order) do
+    local reg = type(registries) == "table" and registries[hw] or nil
+    if type(reg) == "table" and (tonumber(now) or 0) - (tonumber(reg.at) or 0) <= M.BRIDGE_FRESH then
+      covered = covered + 1
+    else
+      missing[#missing + 1] = names[hw]
+    end
+  end
+  return { windows = #order, covered = covered, missing = missing }
 end
 
 -- Which projectKeys have MORE THAN ONE live session right now. Only those tiles
@@ -10801,6 +10909,19 @@ function M.doctorChecks(facts)
 
   if facts.gateArmed then add("Headless approvals armed", "ok", "tool requests gate through this panel")
   else add("Gate disarmed", "info", "auto-approve policies apply; arm it in Settings") end
+
+  -- 2026-09-11: the companion extension (closes an exact Claude tab without keystrokes)
+  local br = type(facts.bridge) == "table" and facts.bridge or nil
+  if br and (tonumber(br.windows) or 0) > 0 then
+    local miss = type(br.missing) == "table" and br.missing or {}
+    if #miss == 0 then
+      add("Shepherd bridge in every VS Code window", "ok", br.covered .. "/" .. br.windows .. " windows can close a tab by name")
+    else
+      add("Shepherd bridge missing in " .. #miss .. " VS Code window" .. ((#miss == 1) and "" or "s"), "warn",
+          "no bridge in: " .. table.concat(miss, ", ") .. " -- Close on its shared-window tabs stays refused",
+          "Developer: Reload Window in that window (or run: make bridge)")
+    end
+  end
 
   if facts.ledgerEnabled then
     add("Audit ledger on", "ok", fmtBytesShort(facts.ledgerBytes) .. " recorded")

@@ -36,6 +36,17 @@ install:
 	@cp cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-core.lua "$(CLAUDE_DIR)/"
 	@chmod +x "$(CLAUDE_DIR)"/cc-*.sh
 	@echo "✅ copied hook scripts + core -> $(CLAUDE_DIR)/"
+	@$(MAKE) --no-print-directory bridge
+
+# The Shepherd companion VS Code extension (vscode-bridge/): packaged with plain zip and
+# installed with VS Code's own CLI -- no Marketplace, no npm. install-vsix.sh skips when
+# that version is already installed, so a deploy only reinstalls on a version bump
+# (FORCE=1 make bridge reinstalls). Warn-only: no VS Code never fails a deploy.
+BRIDGE_BUILD ?= build
+.PHONY: bridge
+bridge:
+	@vsix="$$(bash vscode-bridge/build-vsix.sh "$(BRIDGE_BUILD)")" && bash vscode-bridge/install-vsix.sh "$$vsix" \
+		|| echo "⚠️  Shepherd bridge not built -- Close on shared-window tabs stays refused"
 
 # First-run setup: copy scripts + core into place, merge hooks (with a backup),
 # ensure the init.lua dofile, and build the Dock launcher. Idempotent.

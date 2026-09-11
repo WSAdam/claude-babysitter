@@ -144,6 +144,70 @@ local _, closed = quiet(function() return core.handleAction(fx, a2, "close") end
 local f = io.open(T .. "/status/a2.json", "r"); local stillThere = f ~= nil; if f then f:close() end
 check("close on a shared-window session is refused and its card stays", closed == nil and stillThere and focusCalls == 0 and taps == 0)
 
+-- ---- 2026-09-11: the companion extension closes exactly that session's tab ----
+-- (Adam had to close tabs by hand: nothing outside VS Code could pick one.) The bridge in
+-- the window (host 500) reports its Claude tabs by name; Shepherd asks it to close the one
+-- named like this session's tab -- never a keystroke, and only when exactly one matches.
+local BR = T .. "/.claude/cc-bridge"
+os.execute('mkdir -p "' .. BR .. '/500.in" "' .. BR .. '/500.out"')
+local function exists(p) local h = io.open(p, "r"); if h then h:close() return true end return false end
+local function registry(labels)
+  local tabs = {}
+  for _, l in ipairs(labels) do tabs[#tabs + 1] = { label = l, group = 1, active = false } end
+  write(BR .. "/500.json", json.encode({ v = 1, pid = 500, version = "0.1.0", folders = { MAIN }, tabs = tabs, at = os.time() }))
+end
+local function inbox()
+  local out, p = {}, io.popen('ls -1 "' .. BR .. '/500.in" 2>/dev/null')
+  if p then for l in p:lines() do out[#out + 1] = l end; p:close() end
+  return out
+end
+write(T .. "/a2.jsonl", '{"type":"ai-title","aiTitle":"Fix the sibling window matching","sessionId":"a2"}\n')
+a2.transcript_path = T .. "/a2.jsonl"
+registry({ "Fix the sibling window m…", "Other work" })
+local _, viaBridge = quiet(function() return core.handleAction(fx, a2, "close") end)
+check("close on a shared-window session asks the bridge in its window to close its tab", viaBridge == "close")
+local sent = inbox()
+local cmd = sent[1] and json.decode(io.open(BR .. "/500.in/" .. sent[1]):read("*a")) or {}
+check("...one close command, by the name the tab shows  (label=" .. tostring(cmd.label) .. ")",
+      #sent == 1 and cmd.op == "close" and cmd.label == "Fix the sibling window m…")
+check("...with no focus and no keystroke", focusCalls == 0 and taps == 0)
+check("...and the card stays until the bridge confirms", exists(T .. "/status/a2.json"))
+write(BR .. "/500.out/" .. tostring(cmd.id) .. ".json", json.encode({ v = 1, id = cmd.id, ok = true }))
+quiet(function() fx.bridgePollResults() end)
+check("once the bridge confirms the tab closed, the card goes", not exists(T .. "/status/a2.json"))
+check("...and the result is cleaned up", not exists(BR .. "/500.out/" .. tostring(cmd.id) .. ".json"))
+
+-- two tabs share the name: the bridge must not guess
+os.remove(BR .. "/500.in/" .. tostring(sent[1]))
+write(T .. "/a1.jsonl", '{"type":"ai-title","aiTitle":"Twin","sessionId":"a1"}\n')
+a1.transcript_path = T .. "/a1.jsonl"
+registry({ "Twin", "Twin" })
+alerts = {}
+local _, twin = quiet(function() return core.handleAction(fx, a1, "close") end)
+check("two tabs sharing the name -> Close is refused, nothing is sent", twin == nil and #inbox() == 0)
+local why = table.concat(alerts, " | ")
+check("...the card stays and one alert says why  (" .. why .. ")",
+      exists(T .. "/status/a1.json") and #alerts == 1 and why:find("2 Claude tabs", 1, true) ~= nil)
+
+-- no bridge in that window at all
+os.remove(BR .. "/500.json")
+alerts = {}
+local _, nobridge = quiet(function() return core.handleAction(fx, a1, "close") end)
+check("no bridge in the window -> refused, with the reason  (" .. table.concat(alerts, " | ") .. ")",
+      nobridge == nil and #inbox() == 0 and table.concat(alerts, " "):find("isn't running", 1, true) ~= nil)
+
+-- the bridge never answers: give up, keep the card, say so
+registry({ "Twin", "Solo" })
+write(T .. "/a1.jsonl", '{"type":"ai-title","aiTitle":"Solo","sessionId":"a1"}\n')
+alerts = {}
+quiet(function() return core.handleAction(fx, a1, "close") end)
+for _, p in pairs(fx._bridgePending or {}) do p.at = p.at - 60 end
+quiet(function() fx.bridgePollResults() end)
+check("a bridge that never answers -> the card stays and an alert says so",
+      exists(T .. "/status/a1.json") and table.concat(alerts, " "):find("didn't answer", 1, true) ~= nil)
+check("...and the unanswered command is withdrawn", #inbox() == 0)
+check("the bridge path never focused a window or pressed a key", focusCalls == 0 and taps == 0)
+
 -- the lone session is untouched by the guard
 local _, lone = quiet(function() return fx.pasteIntoWindow(fx.targetFor(b1), { text = "x" }) end)
 check("a session alone in its window is still typed into (its window focused, the paste scheduled)",
