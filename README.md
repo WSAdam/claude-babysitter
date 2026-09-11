@@ -1195,7 +1195,12 @@ It runs in every VS Code window and does one thing: close a Claude tab **by name
 window writes its Claude tabs' names to `~/.claude/cc-bridge/<pid>.json`; Shepherd drops a close
 command in `<pid>.in/` and reads the answer from `<pid>.out/`. It closes a tab only when exactly
 one Claude tab in that window carries the name, never touches other tabs, and has no network
-access. `"tabBridge": { "enabled": false }` in `~/.claude/cc-config.json` stops Shepherd using
+access. **Empty chats** are the one exception: never-used chats all read "Claude Code", so no name
+picks one — but they're interchangeable. A card whose window has any shows *🧹 2 empty chats in
+this window (never used)* with **Close them** (and each gets **Close** in the Instances view); the
+bridge (0.4.0) then closes any untagged "Claude Code" tab, and only while their number still equals
+the empty sessions Shepherd counted there, so a restored old chat (which also reads "Claude Code")
+is never closed by mistake. `"tabBridge": { "enabled": false }` in `~/.claude/cc-config.json` stops Shepherd using
 it (it's not the SSH remote `"bridge"` section, which mirrors other machines' sessions).
 
 ### Shepherd.app — a Dock launcher

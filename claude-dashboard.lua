@@ -2684,7 +2684,10 @@ function FX.tabBridgePollResults()
       os.remove(resFile)
       FX._tabBridgePending[id] = nil
       local ok, res = pcall(function() return core.json.decode(raw) end)
-      if p.op == "select" then   -- bringing a tab forward: logged, never alerted
+      if p.op == "close-empty" and ok and type(res) == "table" and res.ok == true then
+        -- which of the identical empty chats went is unknown: its own SessionEnd clears its card
+        print("[cc-dashboard] ✅ the Shepherd tab bridge closed an empty chat (host " .. p.hw .. ")")
+      elseif p.op == "select" then   -- bringing a tab forward: logged, never alerted
         print("[cc-dashboard] " .. ((ok and type(res) == "table" and res.ok == true) and "✅ brought forward" or "⚠️ couldn't bring forward")
           .. " '" .. p.name .. "'s tab \"" .. p.label .. "\"" .. ((ok and type(res) == "table" and res.reason) and (": " .. tostring(res.reason)) or ""))
       elseif ok and type(res) == "table" and res.ok == true then
@@ -3075,6 +3078,53 @@ function FX.cachedTabCandidates(it)
   local names = FX.sessionTabCandidates(it)
   FX._tabLabels[it.key] = { names = names, at = now }
   return names
+end
+
+-- ---- Empty chats (2026-09-11) -----------------------------------------------------------
+-- Never-used chats all read "Claude Code", so no name closes one; they're interchangeable, so the
+-- bridge closes any untagged "Claude Code" tab while the count still matches (core.emptyChatsVerdict).
+FX._emptyChats = {}   -- host_window -> number of empty chats there (last tick)
+function FX.annotateEmptyChats(list)
+  local byHw = {}
+  for _, it in ipairs(list or {}) do
+    it.emptyChat, it.windowEmptyChats = nil, nil
+    local hw = it.host_window and tostring(it.host_window) or ""
+    if hw ~= "" and not it.remote and (it.editor == "vscode" or it.editor == "cursor")
+       and core.isEmptyChat(it, FX.cachedTabCandidates(it)) then
+      it.emptyChat = true
+      byHw[hw] = (byHw[hw] or 0) + 1
+    end
+  end
+  for _, it in ipairs(list or {}) do
+    local hw = it.host_window and tostring(it.host_window) or ""
+    if byHw[hw] then it.windowEmptyChats = byHw[hw] end
+  end
+  FX._emptyChats = byHw
+end
+
+-- Close the empty chats in this session's window: all of them, or just one ("one").
+function FX.closeEmptyChats(key, which)
+  local it = byKey[key]
+  local hw = it and it.host_window and tostring(it.host_window) or ""
+  local n = FX._emptyChats[hw] or 0
+  local ok, why = core.emptyChatsVerdict(FX.tabBridgeRegistry(hw), n, FX.now())
+  if not ok then FX.alert("Can't close the empty chats: " .. tostring(why)); return false end
+  local howMany = (which == "one") and 1 or n
+  for i = 0, howMany - 1 do
+    local cmd = core.tabBridgeEmptyCommand(n - i, FX.now())
+    if not FX.writeFileAtomic(FX.TAB_BRIDGE_DIR .. "/" .. hw .. ".in/" .. cmd.id .. ".json", core.json.encode(cmd)) then
+      FX.alert("Couldn't reach the Shepherd tab bridge in that window"); return false
+    end
+    FX._tabBridgePending[cmd.id] = { op = "close-empty", key = key, hw = hw, label = core.EMPTY_TAB_LABEL, name = "an empty chat", at = FX.now() }
+  end
+  print("[cc-dashboard] 🧹 asked the Shepherd tab bridge (host " .. hw .. ") to close " .. howMany .. " empty chat(s)")
+  if not FX._tabBridgeTimer then
+    FX._tabBridgeTimer = hs.timer.doEvery(0.5, function()
+      FX.tabBridgePollResults()
+      if next(FX._tabBridgePending) == nil and FX._tabBridgeTimer then FX._tabBridgeTimer:stop(); FX._tabBridgeTimer = nil end
+    end)
+  end
+  return true
 end
 
 -- After a Jump lands on a VS Code window: ask its tab bridge to bring this session's own tab
@@ -6411,6 +6461,8 @@ local function handleBridgeMsg(msg)
   if a == "merge-close-tab" then FX.mergeCloseTab(tostring(payload.v or "")); return end
   if a == "merge-dismiss" then FX.mergeDismiss(tostring(payload.v or "")); return end
   if a == "end-session" then FX.endSession(tostring(payload.v or "")); return end   -- tab-less only (verdict in core)
+  -- empty chats (2026-09-11): v = a session key in that window, text = "one" | "all"
+  if a == "close-empty" then FX.closeEmptyChats(tostring(payload.v or ""), tostring(payload.text or "all")); return end
   -- Shepherd answers (2026-09-11): v = session key, text = JSON picks (checked in core)
   if a == "answer-ask" then FX.answerAskFromPanel(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "release-ask" then FX.releaseAsk(tostring(payload.v or "")); return end
@@ -8457,6 +8509,8 @@ local HTML = [[
   #d-name { font-size:14px; font-weight:700; color:var(--text-strong); }
   #d-status { font-size:11px; color:var(--muted); margin-left:auto; }
   #d-shared { display:none; font-size:11px; color:var(--warn); margin:6px 0 0; line-height:1.35; }
+  #d-empty { display:none; font-size:11px; color:var(--muted); margin:6px 0 0; line-height:1.35; }
+  #d-empty button { font-size:11px; font-family:inherit; margin-left:6px; }
   #d-prompt { font-size:12px; color:var(--text-3); margin:8px 0 0; max-height:48px; overflow:hidden; }
   #d-ask { display:none; margin:8px 0 0; }
   #d-ask .ask-q { font-size:12px; color:var(--text-2); margin-top:6px; }
@@ -9185,6 +9239,7 @@ local HTML = [[
       <span id="d-status"></span>
     </div>
     <div id="d-shared"></div>
+    <div id="d-empty"><span id="de-text"></span> <button id="b-closeempty" onclick="if(selectedKey) send('close-empty', selectedKey, 'all')" title="Close the never-used chats in this window (they're all named Claude Code)">Close them</button></div>
     <!-- Batch driving (2026-09-11): a batch this session proposes or drives; filled with textContent
          only; the note and the checkbox are never rebuilt by a re-render. -->
     <div id="d-batch">
@@ -13202,6 +13257,13 @@ local HTML = [[
           + (others === 1 ? "" : "s") + " — Shepherd won't type into it. Jump there and act in the tab." : "";
         dsh.style.display = shared ? "block" : "none";
       }
+      var dem = document.getElementById("d-empty");
+      if(dem){
+        var ne = it.windowEmptyChats | 0;   // never-used "Claude Code" chats in this window (2026-09-11)
+        document.getElementById("de-text").textContent = ne ? "🧹 " + ne + " empty chat" + (ne === 1 ? "" : "s")
+          + " in this window (never used)" : "";
+        dem.style.display = ne ? "block" : "none";
+      }
       renderMerge(it);
       renderBatch(it);
       var dtl = document.getElementById("d-tabless");
@@ -13441,6 +13503,7 @@ local HTML = [[
                      ? '<button class="in-btn" data-inact="unhide" data-k="' + esc(im.key) + '">Unhide</button>'
                      : (canMerge ? '<button class="in-btn" data-inact="merge" data-k="' + esc(im.key) + '" title="Merge it (the review is in Details)">⇡ Merge</button>' : '')
                        + (im.tabless ? '<button class="in-btn" data-inact="end" data-k="' + esc(im.key) + '" title="Stop this leftover claude process (asks first)">End</button>' : '')
+                       + (im.emptyChat ? '<button class="in-btn" data-inact="close-empty" data-k="' + esc(im.key) + '" title="Close a never-used chat in this window (they are interchangeable)">Close</button>' : '')
                        + '<button class="in-btn" data-inact="focus" data-k="' + esc(im.key) + '">Focus</button>'
                        + '<button class="in-btn" data-inact="details" data-k="' + esc(im.key) + '">' + (mg ? 'Review' : 'Details') + '</button>')
              +   '</div>'
@@ -13496,6 +13559,7 @@ local HTML = [[
         else if(act === "unhide"){ send("unhide-tile", k); }
         else if(act === "merge"){ send("merge-approve", k); }
         else if(act === "ask"){ send("answer", k, String(b.getAttribute("data-oi") || "0")); }
+        else if(act === "close-empty"){ send("close-empty", k, "one"); }
         else if(act === "end"){ endSessionFor(k); }
         else if(act === "open"){ INST.opening[k] = Date.now(); send("open-worktree", INST.stackKey, k); renderInstances(true); }
       });
@@ -17102,6 +17166,7 @@ function FX._refreshBody()
   FX.annotateMerges(list, cfg, bannerOn)
   FX.annotateTabless(list, cfg)   -- a claude process with no tab in its window (2026-09-11)
   FX.annotateAsks(list, bannerOn)   -- a question held for Adam by cc-ask.sh (2026-09-11)
+  FX.annotateEmptyChats(list)       -- never-used "Claude Code" chats, closable from the card (2026-09-11)
   -- Two sessions in ONE project used to render as IDENTICAL cards: the name (and
   -- any relabel) is per-projectKey, so nothing on either tile said which chat it
   -- was. Give each of those tiles its own chat title -- and only those, so a

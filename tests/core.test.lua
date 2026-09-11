@@ -9275,5 +9275,36 @@ do
      core.rankInstances({ plain, asking }, {})[1].key, "49f0")
 end
 
+-- ---- Close empty chats (2026-09-11) --------------------------------------------------------
+-- 2026-09-11 live: two never-used chats (both "Claude Code") sat in Shepherd's window as "also: 2
+-- idle" and kept the shared-window banner up; no name told them apart, so nothing could close them.
+do
+  local function reg(tabs, version, at) return { at = at or 995, version = version or "0.4.0", tabs = tabs } end
+  local CC, T = "Claude Code", { label = "Claude tabs workflow int…" }
+  local ok, why = core.emptyChatsVerdict(reg({ T, { label = CC }, { label = CC } }), 2, 1000)
+  check("empty chats: as many untagged \"Claude Code\" tabs as empty sessions -> may close  (" .. tostring(why) .. ")", ok == true)
+  local r1, w1 = core.emptyChatsVerdict(reg({ T, { label = CC }, { label = CC }, { label = CC } }), 2, 1000)
+  check("empty chats: an extra \"Claude Code\" tab (a restored old chat with no session) -> refused  (" .. tostring(w1) .. ")", r1 == false)
+  check("empty chats: a batch unit's tagged tab never counts",
+        core.emptyChatsVerdict(reg({ { label = CC }, { label = CC, unit = "b1:x" } }), 1, 1000) == true)
+  check("empty chats: none -> nothing to close", core.emptyChatsVerdict(reg({ T }), 0, 1000) == false)
+  check("empty chats: a stale registry -> refused", core.emptyChatsVerdict(reg({ { label = CC } }, "0.4.0", 900), 1, 1000) == false)
+  local r3, w3 = core.emptyChatsVerdict(reg({ { label = CC }, { label = CC } }, "0.3.0"), 2, 1000)
+  check("empty chats: several on an older bridge -> refused, saying to reload that window  (" .. tostring(w3) .. ")",
+        r3 == false and tostring(w3):find("Reload Window", 1, true) ~= nil)
+  check("empty chats: a single one on an older bridge is closable by its unique name",
+        core.emptyChatsVerdict(reg({ T, { label = CC } }, "0.3.0"), 1, 1000) == true)
+  local c2 = core.tabBridgeEmptyCommand(2, 1000)
+  local c1 = core.tabBridgeEmptyCommand(1, 1000)
+  check("empty close command: \"Claude Code\" with the count, a close",
+        c2.op == "close" and c2.label == CC and c2.empty == 2 and c2.unit == nil and c2.at == 1000)
+  check("empty close commands run in count order (the bridge reads its inbox sorted by name)", c2.id < c1.id)
+  check("empty session: no names at all", core.isEmptyChat({ status = "idle" }, { CC }) == true)
+  check("empty session: a chat with a prompt isn't", core.isEmptyChat({ status = "idle", last_prompt = "hi" }, { CC }) == false)
+  check("empty session: a named chat isn't", core.isEmptyChat({ status = "idle" }, { "Fix it", CC }) == false)
+  check("empty session: one that's working isn't", core.isEmptyChat({ status = "working" }, { CC }) == false)
+  check("empty session: no transcript path at all is unknown, never empty", core.isEmptyChat({ status = "idle" }, nil) == false)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

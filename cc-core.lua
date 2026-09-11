@@ -810,6 +810,62 @@ function M.tabBridgeCommand(key, label, now, op, unit)
            label = (unit == nil) and label or nil, unit = unit, at = math.floor(tonumber(now) or 0) }
 end
 
+-- ---- Empty chats (2026-09-11) ----
+-- A never-used chat: idle, no prompt, no name -- its tab reads "Claude Code". Such chats are
+-- interchangeable, so the bridge (0.4.0) may close ANY untagged "Claude Code" tab -- but only
+-- while their number equals the window's empty sessions Shepherd counted: a restored old chat
+-- also reads "Claude Code" but has no session, so it makes the numbers differ and nothing closes.
+M.EMPTY_TAB_LABEL = "Claude Code"
+function M.isEmptyChat(it, names)
+  if type(it) ~= "table" or it.remote then return false end
+  if it.status ~= "idle" and it.status ~= "done" then return false end
+  if type(it.last_prompt) == "string" and it.last_prompt ~= "" then return false end
+  -- names == nil: no transcript path at all -- unknown, never judged empty
+  return type(names) == "table" and #names == 1 and names[1] == M.EMPTY_TAB_LABEL
+end
+
+local function versionAtLeast(v, want)
+  local a, b = {}, {}
+  for n in tostring(v or ""):gmatch("%d+") do a[#a + 1] = tonumber(n) end
+  for n in tostring(want):gmatch("%d+") do b[#b + 1] = tonumber(n) end
+  for i = 1, math.max(#a, #b) do
+    if (a[i] or 0) ~= (b[i] or 0) then return (a[i] or 0) > (b[i] or 0) end
+  end
+  return true
+end
+
+function M.emptyChatsVerdict(reg, emptyCount, now)
+  emptyCount = math.floor(tonumber(emptyCount) or 0)
+  if emptyCount < 1 then return false, "no empty chats in that window" end
+  if type(reg) ~= "table" or type(reg.tabs) ~= "table" then
+    return false, "the Shepherd tab bridge isn't running in that VS Code window (Developer: Reload Window there once)"
+  end
+  if (tonumber(now) or 0) - (tonumber(reg.at) or 0) > M.TAB_BRIDGE_FRESH then
+    return false, "the Shepherd tab bridge in that VS Code window stopped reporting"
+  end
+  local n = 0
+  for _, t in ipairs(reg.tabs) do
+    if type(t) == "table" and t.label == M.EMPTY_TAB_LABEL and not t.unit then n = n + 1 end
+  end
+  if n ~= emptyCount then
+    return false, "that window shows " .. n .. " \"" .. M.EMPTY_TAB_LABEL .. "\" tab(s) but " .. emptyCount
+      .. " empty chat(s) -- a restored old chat may be among them, so none is closed"
+  end
+  if n > 1 and not versionAtLeast(reg.version, "0.4.0") then
+    return false, "that window's Shepherd tab bridge is older (" .. tostring(reg.version)
+      .. ") -- Developer: Reload Window there once to let Shepherd close empty chats"
+  end
+  return true
+end
+
+-- The bridge reads its inbox sorted by name: the command for the larger count must run first.
+function M.tabBridgeEmptyCommand(count, now)
+  count = math.floor(tonumber(count) or 0)
+  local at = math.floor(tonumber(now) or 0)
+  return { v = 1, id = string.format("empty-%02d-%d", 99 - count, at), op = "close",
+           label = M.EMPTY_TAB_LABEL, empty = count, at = at }
+end
+
 -- A batch unit's tab tag: "<batch id>:<slug>" (what the bridge's "expect" hands out).
 function M.fleetUnitTag(batchId, slug) return tostring(batchId) .. ":" .. tostring(slug) end
 
@@ -1364,6 +1420,7 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
       bgActive = it.bg_active and true or nil,
       tabless = it.tabless and true or nil,
       ask = it.askHeld and it.askView or nil,   -- a question held for Adam (cc-ask.sh), answered on the row
+      emptyChat = it.emptyChat and true or nil, -- a never-used "Claude Code" chat: Close on the row
       -- ready to merge: just what the row shows (the review lives in the detail panel)
       merge = (type(it.merge) == "table") and { phase = it.merge.phase, line = it.merge.line,
         needsYou = it.merge.needsYou, ready = it.merge.ready, queued = it.merge.queued, sent = it.merge.sent } or nil,

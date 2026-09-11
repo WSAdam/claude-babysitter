@@ -94,6 +94,23 @@ check("pick: no tab with the name -> a reason naming it", !none.hit && /no Claud
 const two = lib.pickExactlyOne(tabs, "Claude Code");
 check("pick: two tabs share the name -> refused, never the first one", !two.hit && /2 Claude tabs share the name/.test(two.reason));
 
+// 2026-09-11: never-used chats all read "Claude Code", so no name picks one. They're
+// interchangeable, so Shepherd may close ANY of them -- but only when the count it checked
+// (its empty sessions in this window) still matches the untagged "Claude Code" tabs here.
+const nowS = Math.floor(Date.now() / 1000);
+const emptyCmd = { v: 1, id: "e1", op: "close", label: "Claude Code", empty: 2, at: nowS };
+check("command: close an empty chat (\"Claude Code\", with Shepherd's count) is accepted", lib.validateCommand(emptyCmd, Date.now()).ok === true);
+eq("command: ...and keeps the count", lib.validateCommand(emptyCmd, Date.now()).cmd.empty, 2);
+check("command: 'empty' only for the name \"Claude Code\"", !lib.validateCommand(Object.assign({}, emptyCmd, { label: "Fix sibling window" }), Date.now()).ok);
+check("command: 'empty' only for close", !lib.validateCommand(Object.assign({}, emptyCmd, { op: "select" }), Date.now()).ok);
+check("command: 'empty' must be a count from 1 to 20", !lib.validateCommand(Object.assign({}, emptyCmd, { empty: 0 }), Date.now()).ok
+      && !lib.validateCommand(Object.assign({}, emptyCmd, { empty: "2" }), Date.now()).ok);
+const eTabs = [{ label: "Claude Code", active: true }, { label: "Claude Code", unit: "b1:x" }, { label: "Fix" }, { label: "Claude Code" }];
+const pe = lib.pickEmpty(eTabs, 2);
+check("pick empty: one untagged \"Claude Code\" tab, preferring one not in front", pe.hit === eTabs[3]);
+const pe3 = lib.pickEmpty(eTabs, 3);
+check("pick empty: the count doesn't match -> refused (a tagged unit's tab never counts)", !pe3.hit && /2 untagged/.test(pe3.reason));
+
 // ---- the real extension.js against a fake vscode, in a temp bridge dir ----
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), "cc-bridge-"));
 process.env.CC_BRIDGE_DIR = DIR;
@@ -206,7 +223,7 @@ Module._load = realLoad;
   await ext._test.processInbox();
   check("select: two tabs sharing the name -> refused, no command run", (result("s2") || {}).ok === false && executed.length === 0);
   check("select: no tab with the name -> refused", (result("s3") || {}).ok === false);
-  eq("the registry reports the bridge's version", JSON.parse(fs.readFileSync(regFile, "utf8")).version, "0.3.0");
+  eq("the registry reports the bridge's version", JSON.parse(fs.readFileSync(regFile, "utf8")).version, "0.4.0");   // 2026-09-11: 0.4.0 closes empty chats
 
   // 2026-09-11: a tab Shepherd opens for a batch unit never gets a name (its task arrives by
   // message, so no chat title) -- every such tab reads "Claude Code". The bridge remembers the
@@ -240,6 +257,22 @@ Module._load = realLoad;
   send({ v: 1, id: "u3", op: "close", unit: "b1:cheer", at: at() });
   await ext._test.processInbox();
   check("close by unit: once it's gone, refused", (result("u3") || {}).ok === false);
+  // an empty chat: any untagged "Claude Code" tab, when Shepherd's count matches
+  liveGroups[0].tabs.push(claudeTab("Claude Code"), claudeTab("Claude Code"));
+  ext._test.writeRegistry();
+  const regTabs = () => JSON.parse(fs.readFileSync(regFile, "utf8")).tabs;
+  const emptyNow = () => regTabs().filter((t) => t.label === "Claude Code" && !t.unit).length;
+  const taggedNow = () => regTabs().filter((t) => t.unit).length;
+  const n0 = emptyNow(), tagged0 = taggedNow(), before2 = closed.length;
+  send({ v: 1, id: "e9", op: "close", label: "Claude Code", empty: n0 + 1, at: at() });
+  await ext._test.processInbox();
+  check("close empty: a count that doesn't match -> refused, nothing closed", (result("e9") || {}).ok === false && closed.length === before2);
+  send({ v: 1, id: "e2", op: "close", label: "Claude Code", empty: n0, at: at() });
+  await ext._test.processInbox();
+  ext._test.writeRegistry();
+  check("close empty: the count matches -> one of them is closed  (" + n0 + " -> " + emptyNow() + ")",
+        (result("e2") || {}).ok === true && closed.length === before2 + 1 && emptyNow() === n0 - 1);
+  check("close empty: a unit's tagged tab is never one of them", taggedNow() === tagged0);
   check("command: expect needs a unit", !lib.validateCommand({ v: 1, id: "x", op: "expect", at: Math.floor(Date.now() / 1000) }, Date.now()).ok);
   check("command: close by unit is accepted without a label",
         lib.validateCommand({ v: 1, id: "x", op: "close", unit: "b1:cheer", at: Math.floor(Date.now() / 1000) }, Date.now()).ok === true);

@@ -230,4 +230,42 @@ local sc = sel[1] and json.decode(io.open(BR .. "/500.in/" .. sel[1]):read("*a")
 check("Jump focuses the window, then asks its tab bridge to bring the session's tab forward  (op=" .. tostring(sc.op) .. " label=" .. tostring(sc.label) .. ")",
       jumped == "focus" and focusCalls == before + 1 and #sel == 1 and sc.op == "select" and sc.label == "Solo")
 check("...still without a keystroke", taps == 0)
+
+-- ---- 2026-09-11 live: two never-used chats ("Claude Code") in Shepherd's own window kept the
+-- shared-window banner up as "also: 2 idle"; no name told them apart, so nothing closed them. ----
+os.execute('mkdir -p "' .. T .. '/win7" "' .. BR .. '/700.in" "' .. BR .. '/700.out"')
+write(T .. "/r7.jsonl", '{"type":"ai-title","aiTitle":"Claude tabs workflow integration","sessionId":"r7"}\n')
+for _, s in ipairs({ { "r7", "701", T .. "/r7.jsonl" }, { "e7", "702", T .. "/e7.jsonl" }, { "f7", "703", T .. "/f7.jsonl" } }) do
+  write(T .. "/status/" .. s[1] .. ".json", string.format(
+    '{"status":"idle","session_id":"%s","name":"win7","cwd":"%s","since":%d,"updated":%d,"editor":"vscode","host_window":"700","session_pid":"%s","transcript_path":"%s"}',
+    s[1], T .. "/win7", now, now, s[2], s[3]))
+end
+local function reg7(labels, version)
+  local tabs = {}
+  for _, l in ipairs(labels) do tabs[#tabs + 1] = { label = l, group = 1, active = false } end
+  write(BR .. "/700.json", json.encode({ v = 1, pid = 700, version = version or "0.4.0", folders = { T .. "/win7" }, tabs = tabs, at = os.time() }))
+end
+reg7({ "Claude tabs workflow int…", "Claude Code", "Claude Code" })
+quiet(function() fx._refreshBody() end)
+byK = {}
+for _, it in ipairs(fx._shownItems or {}) do byK[it.key] = it end
+check("never-used chats are marked empty", byK.e7 and byK.e7.emptyChat == true and byK.f7 and byK.f7.emptyChat == true)
+check("...the real chat isn't, and its card knows its window has 2  (" .. tostring(byK.r7 and byK.r7.windowEmptyChats) .. ")",
+      byK.r7 and not byK.r7.emptyChat and byK.r7.windowEmptyChats == 2)
+local function inbox7()
+  local out, p = {}, io.popen('ls -1 "' .. BR .. '/700.in" 2>/dev/null')
+  if p then for l in p:lines() do local fh = io.open(BR .. "/700.in/" .. l); out[#out + 1] = json.decode(fh:read("*a")); fh:close() end; p:close() end
+  return out
+end
+quiet(function() fx.closeEmptyChats("r7", "all") end)
+local ec = inbox7()
+check("Close them: one close per empty chat, each \"Claude Code\" with the count it expects  (n=" .. #ec .. ")",
+      #ec == 2 and ec[1].label == "Claude Code" and ec[1].empty == 2 and ec[2].empty == 1 and ec[1].op == "close")
+os.execute('rm -f "' .. BR .. '/700.in/"*')
+reg7({ "Claude tabs workflow int…", "Claude Code", "Claude Code", "Claude Code" })
+alerts = {}
+quiet(function() fx._refreshBody(); fx.closeEmptyChats("r7", "all") end)
+check("an extra \"Claude Code\" tab (a restored old chat) -> nothing sent, and it says why",
+      #inbox7() == 0 and table.concat(alerts, " "):find("restored old chat", 1, true) ~= nil)
+check("no keystroke for any of it", taps == 0)
 finish()

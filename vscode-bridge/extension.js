@@ -108,7 +108,8 @@ async function processInbox() {
         answer(id, { ok: true });
         continue;
       }
-      const pick = v.cmd.unit ? lib.pickUnit(snapshot(), v.cmd.unit) : lib.pickExactlyOne(snapshot(), v.cmd.label);
+      const pick = v.cmd.unit ? lib.pickUnit(snapshot(), v.cmd.unit)
+        : (v.cmd.empty ? lib.pickEmpty(snapshot(), v.cmd.empty) : lib.pickExactlyOne(snapshot(), v.cmd.label));
       if (!pick.hit) {
         log("⚠️ didn't " + v.cmd.op + " \"" + (v.cmd.unit || v.cmd.label) + "\": " + pick.reason);
         answer(id, { ok: false, reason: pick.reason });

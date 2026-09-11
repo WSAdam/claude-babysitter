@@ -4,6 +4,20 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — Close empty chats
+
+### Added — never-used "Claude Code" chats can be closed from the card
+
+Two never-used chats in Shepherd's own window kept "also: 2 idle" and the shared-window banner on its
+card, and nothing could close them: they both read "Claude Code", and the tab bridge closes only a
+unique name. They're interchangeable, so the bridge (0.4.0) now also closes ANY untagged "Claude
+Code" tab — only when told how many such tabs Shepherd expects, and only while that still equals the
+window's empty sessions (a restored old chat reads "Claude Code" too but has no session, so it makes
+the numbers differ and nothing closes). The card says *🧹 2 empty chats in this window* with
+**Close them**; each empty chat gets **Close** in Instances. Windows need **Developer: Reload
+Window** once to run bridge 0.4.0. Fixtures: `tests/bridge.test.js`, `tests/core.test.lua`
+(`core.emptyChatsVerdict`), `tests/shared-window.test.lua`.
+
 ## 2026-09-11 — A batch ends itself
 
 ### Fixed — a finished batch stayed on the driver's card

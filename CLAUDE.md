@@ -63,7 +63,10 @@ and the README's "Testing & development" section.
   only: close (`FX.closeTab`, the strict label `core.claudeTabLabel`), select (`FX.selectTab`
   after a Jump, any of `core.claudeTabCandidates`), and expect (tag the next Claude tab that opens
   as a batch unit's -- those tabs never get a name, so close/select take `unit` instead of a
-  label for them; a window reload forgets the tags). Never add another op, and never use the
+  label for them; a window reload forgets the tags). One narrow exception (0.4.0): close with
+  `empty: <count>` closes ANY untagged "Claude Code" tab (never-used chats are interchangeable),
+  only while that count equals Shepherd's empty sessions there (`core.emptyChatsVerdict`) -- a
+  restored old chat reads "Claude Code" too but has no session. Never add another op, and never use the
   Claude URI to reveal a tab (D-14). Bump its `package.json` version with every change, or
   `make install` won't reinstall it; running windows pick it up after a reload.
 - The tab bridge's switch is `tabBridge.*`; plain `bridge.*` is the SSH remote bridge
