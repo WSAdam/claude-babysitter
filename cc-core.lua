@@ -1060,6 +1060,7 @@ function M.instanceTier(it, seenAt)
   -- 2026-09-11: a merge request waiting for Adam (or one that came back blocked) needs him
   -- as much as an approval does.
   if it and type(it.merge) == "table" and it.merge.needsYou then return 1 end
+  if it and type(it.fleet) == "table" and it.fleet.needsYou then return 1 end   -- a batch waiting for Adam
   if st == "approval" then return 1 end
   if st == "error" then return 2 end
   if it and it.hung then return 3 end
@@ -1628,6 +1629,127 @@ function M.mergeView(req, rd, facts, q)
   end
   v.line = M.mergeLine(v)
   v.needsYou = M.mergeNeedsYou(v)
+  return v
+end
+
+-- ---- Batch driving (2026-09-11) ---------------------------------------------------
+-- A Claude session drives several worktree units on Adam's ONE approval: cc-fleet.sh writes
+-- ~/.claude/cc-fleet/<id>.json; Shepherd shows it on the driver's card, records Adam's grant in
+-- its own <id>.state.json (never trusting the proposal's word), opens each unit's tab on the
+-- driver's request, and -- only when the grant includes merges -- approves a unit's own merge
+-- request once its readiness check passes.
+M.BATCH_PHASES = { proposed = true, approved = true, denied = true, stopped = true }
+M.BATCH_TYPES = { feat = true, fix = true, ui = true, docs = true }
+
+local function batchSlugOk(s)
+  return type(s) == "string" and #s <= 40 and s:match("^[a-z0-9][a-z0-9._-]*$") ~= nil
+     and not s:find("..", 1, true) and not s:match("%.$") and not s:match("%.lock$")
+end
+
+function M.parseBatch(raw)
+  if type(raw) ~= "string" then return nil end
+  local ok, t = pcall(function() return M.json.decode(raw) end)
+  if not ok or type(t) ~= "table" or tonumber(t.v) ~= 1 then return nil end
+  if type(t.id) ~= "string" or not t.id:match("^b%w+$") then return nil end
+  if type(t.nonce) ~= "string" or not t.nonce:match("^[%w._-]+$") then return nil end
+  if not M.BATCH_PHASES[t.phase] then return nil end
+  local d = t.driver
+  if type(d) ~= "table" or type(d.session_id) ~= "string" or d.session_id == "" then return nil end
+  if type(t.repo) ~= "string" or t.repo:sub(1, 1) ~= "/" then return nil end
+  local repo = M.normDir(t.repo)
+  if type(t.commonDir) ~= "string" or M.normDir(t.commonDir) ~= repo .. "/.git" then return nil end
+  if type(t.units) ~= "table" or #t.units < 1 or #t.units > 8 then return nil end
+  local units, seen = {}, {}
+  for _, u in ipairs(t.units) do
+    if type(u) ~= "table" or not M.BATCH_TYPES[u.type] or not batchSlugOk(u.slug) or seen[u.slug] then return nil end
+    if u.branch ~= u.type .. "/" .. u.slug or type(u.task) ~= "string" or u.task == "" then return nil end
+    seen[u.slug] = true
+    units[#units + 1] = { type = u.type, slug = u.slug, branch = u.branch, task = capChars(u.task, 4000) }
+  end
+  return { id = t.id, nonce = t.nonce, phase = t.phase, repo = repo, commonDir = repo .. "/.git",
+           driver = { session_id = d.session_id, pid = tostring(d.pid or ""), name = type(d.name) == "string" and d.name or "" },
+           title = capChars(t.title, 120), mergeWhenGreen = t.mergeWhenGreen == true, units = units,
+           at = tonumber(t.at) or 0 }
+end
+
+local function batchUnit(batch, slug)
+  for _, u in ipairs(batch and batch.units or {}) do if u.slug == slug then return u end end
+  return nil
+end
+
+-- May Shepherd open this unit's tab? `grant` is Shepherd's own record of Adam's answer.
+function M.fleetTabVerdict(batch, grant, state, req)
+  if type(batch) ~= "table" or type(req) ~= "table" then return false, "no such batch" end
+  if type(grant) ~= "table" or not grant.approved then return false, "Adam hasn't approved this batch" end
+  if grant.stopped then return false, "the batch was stopped" end
+  if req.session_id ~= batch.driver.session_id then return false, "only the session that proposed the batch can open its tabs" end
+  if not batchUnit(batch, req.slug) then return false, "the batch has no unit '" .. tostring(req.slug) .. "'" end
+  local us = type(state) == "table" and type(state.units) == "table" and state.units[req.slug] or nil
+  if type(us) == "table" and us.session then return false, "that unit already has its tab" end
+  return true
+end
+
+-- Which session is the tab Shepherd just opened? The one ~/.claude/sessions entry that wasn't
+-- there before and whose cwd is the repo root. None yet -> nil (keep waiting); two -> refused.
+function M.newTabSession(before, after, root)
+  local hits = {}
+  for pid, e in pairs(after or {}) do
+    if type(e) == "table" and not (before or {})[pid] and type(e.cwd) == "string" and M.normDir(e.cwd) == root then
+      hits[#hits + 1] = e
+    end
+  end
+  if #hits == 1 then return hits[1] end
+  if #hits == 0 then return nil, "no new session yet" end
+  return nil, #hits .. " new sessions appeared in that folder at once"
+end
+
+-- What the driver sends a unit's tab: the New worktree tab prompt, the task, how to finish, and
+-- who to report to.
+function M.fleetUnitMessage(batch, unit)
+  local who = (batch.driver.name ~= "" and batch.driver.name) or "the session that sent this"
+  return M.worktreeTabPrompt({ branch = unit.branch, slug = unit.slug }, "Task: " .. unit.task)
+    .. "\n\nThis is unit " .. unit.branch .. " of the batch \"" .. batch.title .. "\" that Adam approved in Shepherd. "
+    .. "When the unit is done, finish it with the ready-to-merge protocol in the global CLAUDE.md "
+    .. "(~/.claude/cc-merge.sh request, in the background) and follow its answer. "
+    .. "Report to " .. who .. " with SendMessage when you've asked for the merge, and again when it has merged or blocked."
+end
+
+-- A merge Shepherd may approve on the batch's grant: Adam granted merges, the batch isn't
+-- stopped, and the request comes from the unit's OWN session on the unit's OWN branch.
+function M.fleetDelegatedMerge(batch, grant, state, req)
+  if type(batch) ~= "table" or type(grant) ~= "table" or type(req) ~= "table" then return false end
+  if not grant.approved or not grant.grantMerge or grant.stopped then return false end
+  for _, u in ipairs(batch.units) do
+    local us = type(state) == "table" and type(state.units) == "table" and state.units[u.slug] or nil
+    if u.branch == req.branch and type(us) == "table" and type(us.session) == "table"
+       and us.session.id ~= nil and us.session.id == req.session_id then
+      return true
+    end
+  end
+  return false
+end
+
+-- What the driver's card and the review get.
+function M.batchView(batch, grant, state)
+  grant = type(grant) == "table" and grant or {}
+  local phase = grant.stopped and "stopped" or (grant.approved and "approved") or (grant.denied and "denied") or "proposed"
+  local folder = batch.repo:match("([^/]+)/?$") or batch.repo
+  local n = #batch.units
+  local units = {}
+  for _, u in ipairs(batch.units) do
+    local us = type(state) == "table" and type(state.units) == "table" and state.units[u.slug] or {}
+    units[#units + 1] = { type = u.type, slug = u.slug, branch = u.branch, task = capChars(u.task, 300),
+                          session = type(us.session) == "table" and us.session.name or nil,
+                          opening = us.opening and true or nil }
+  end
+  local v = { id = batch.id, title = batch.title, repo = folder, phase = phase, units = units,
+              mergeWhenGreen = batch.mergeWhenGreen, grantMerge = grant.grantMerge and true or nil }
+  if phase == "proposed" then v.line = "⇉ proposes " .. n .. " unit" .. ((n == 1) and "" or "s") .. " in " .. folder
+  elseif phase == "approved" then
+    v.line = "⇉ driving " .. n .. " unit" .. ((n == 1) and "" or "s") .. " in " .. folder .. (grant.grantMerge and " · merges delegated" or "")
+  elseif phase == "stopped" then v.line = "⇉ batch stopped: " .. batch.title
+  else v.line = "⇉ batch denied: " .. batch.title end
+  v.needsYou = (phase == "proposed")
   return v
 end
 
@@ -11365,6 +11487,9 @@ M.FEATURES = {
   { key = "merge", cat = "Control", new = true, title = "Ready to merge",
     what = "A worktree tab that finishes its unit asks for a merge; its card says so and the detail panel shows the review — commits, files, full diff, the session's summary and test claim. Merge lets it rebase, test and fast-forward main (one merge per repo at a time); afterwards Shepherd closes its tab. Not yet sends your note back.",
     why = "Several tabs can work in parallel and you only approve the merges — no rebasing, merging, cleanup or tab-closing by hand." },
+  { key = "fleet", cat = "Control", new = true, title = "Claude drives a batch",
+    what = "A Claude session proposes a batch of worktree units; you approve it once on its card (and choose whether it may merge them when green). It then opens each unit's tab through Shepherd and hands it its task. Stop batch ends it.",
+    why = "Parallel work without opening tabs, pressing Return or clicking every merge -- your one approval is the permission." },
   { key = "transcript", cat = "Control", new = true, title = "Transcript peek",
     what = "Read a session's recent back-and-forth, with a search box, right inside the panel.",
     why = "Triage what a session is actually doing in a glance instead of switching windows." },

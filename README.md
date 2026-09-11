@@ -219,6 +219,31 @@ instead of merging on its own: it runs `~/.claude/cc-merge.sh request --summary 
 - No keystrokes: the request and your answer are files in `~/.claude/cc-merge/`, and the answer is
   bound to the request it's for. `"merge": { "enabled": false }` makes Shepherd ignore requests.
 
+### Claude drives a batch
+
+Ask a Claude session to run several units in parallel and it can drive the whole loop — with
+**one approval from you per batch**:
+
+1. It writes the batch (title, units with type / name / task, and whether it asks to merge them
+   when green) and runs `~/.claude/cc-fleet.sh propose --file <batch.json>` in the background.
+2. Its card says *⇉ proposes 3 units in <repo>* (teal ring, one alert) and its detail panel shows
+   the batch: every unit and its task, and a **"Claude may merge these when green"** checkbox set to
+   what it asked for — untick it to keep merges for yourself. **Approve batch** or **Deny** (+ a note).
+3. On approval it runs `cc-fleet.sh tab --batch <id> --unit <name>` per unit: Shepherd opens an
+   empty Claude tab in the repo's window, works out which new session is that tab (one tab opening
+   per repo at a time), and hands back its name and the unit's message. The driver sends it with
+   **SendMessage** — the tab starts working with no Enter pressed, under its own permissions — and
+   gets notified when the unit goes idle.
+4. Each unit finishes with the ready-to-merge flow above. With merge permission, Shepherd approves
+   a unit's merge on the batch's grant **only** for that unit's own session on its own branch, once
+   its own git check passes — one merge per repo at a time; without it, units wait for your Merge.
+   Tabs close after their merges as usual.
+5. **Stop batch** (on the driver's card) — or `cc-fleet.sh stop` — ends it at once: no more tabs,
+   no more merges on its grant.
+
+Your approval lives in Shepherd (`~/.claude/cc-fleet/<id>.state.json`), never in the proposal's own
+file. `"fleet": { "enabled": false }` makes Shepherd ignore proposals.
+
 ## Control actions
 
 The **header** has **New** (opens the new-session modal — see "Spawn"), a **☕

@@ -2668,6 +2668,263 @@ function FX.tabBridgePollResults()
   end
 end
 
+-- ---- Batch driving (2026-09-11) ---------------------------------------------------
+-- cc-fleet.sh (a driving Claude session) proposes a batch in <FLEET_DIR>/<id>.json; Adam
+-- approves it once on the driver's card. Adam's grant lives HERE, in <id>.state.json (written
+-- only by Shepherd) -- never in the proposal's own phase. On the driver's request Shepherd opens
+-- each unit's tab (an empty Claude tab via FX.openClaudeTab) and identifies its session; merges
+-- go through on the grant only for a unit's own session and branch. No keystrokes.
+FX.FLEET_DIR = os.getenv("CC_FLEET_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-fleet")
+FX.SESSIONS_DIR = os.getenv("CC_SESSIONS_DIR") or ((os.getenv("HOME") or "") .. "/.claude/sessions")
+FX.FLEET_TAB_WAIT = 90
+FX._fleetState = {}     -- id -> { grant = {approved, grantMerge, denied, stopped, at}, units = {slug -> {session, opening}} }
+FX._fleetBatches = {}   -- id -> parsed proposal (last tick)
+FX._fleetTabs = {}      -- "<id>|<slug>" -> { before, at, nonce, repo }: a tab being opened
+FX._fleetAnswered = {}  -- request nonce -> true
+FX._fleetAlerted = {}   -- proposal nonce -> true
+
+function FX.fleetState(id)
+  if not FX._fleetState[id] then
+    local s
+    local raw = FX.readFile(FX.FLEET_DIR .. "/" .. id .. ".state.json")
+    if raw then
+      local ok, t = pcall(function() return core.json.decode(raw) end)
+      if ok and type(t) == "table" then s = t end
+    end
+    s = s or {}
+    if type(s.units) ~= "table" then s.units = {} end
+    if type(s.grant) ~= "table" then s.grant = nil end
+    FX._fleetState[id] = s
+  end
+  return FX._fleetState[id]
+end
+
+function FX.saveFleetState(id)
+  FX.writeFileAtomic(FX.FLEET_DIR .. "/" .. id .. ".state.json", core.json.encode(FX.fleetState(id)))
+end
+
+function FX.readFleet()
+  local out = {}
+  for _, name in ipairs(FX.readDir(FX.FLEET_DIR)) do
+    local id = name:match("^(b%w+)%.json$")
+    if id then
+      local b = core.parseBatch(FX.readFile(FX.FLEET_DIR .. "/" .. name))
+      if b and b.id == id then out[id] = b end
+    end
+  end
+  return out
+end
+
+-- Every live session registry entry (~/.claude/sessions/<pid>.json), by pid.
+function FX.readSessions()
+  local out = {}
+  for _, name in ipairs(FX.readDir(FX.SESSIONS_DIR)) do
+    local pid = name:match("^(%d+)%.json$")
+    if pid then
+      local ok, e = pcall(function() return core.json.decode(FX.readFile(FX.SESSIONS_DIR .. "/" .. name) or "") end)
+      if ok and type(e) == "table" then out[pid] = e end
+    end
+  end
+  return out
+end
+
+-- The extension host of the VS Code window that has `repo` open (its tab bridge says so).
+function FX.fleetRepoHost(repo)
+  for _, name in ipairs(FX.readDir(FX.TAB_BRIDGE_DIR)) do
+    local pid = name:match("^(%d+)%.json$")
+    if pid then
+      local reg = FX.tabBridgeRegistry(pid)
+      for _, f in ipairs(type(reg) == "table" and type(reg.folders) == "table" and reg.folders or {}) do
+        if core.normDir(tostring(f)) == repo then return pid end
+      end
+    end
+  end
+  return nil
+end
+
+function FX.fleetAnswer(id, slug, body)
+  if body.nonce then FX._fleetAnswered[body.nonce] = true end
+  FX.writeFileAtomic(FX.FLEET_DIR .. "/" .. id .. ".tab-" .. slug .. ".answer", core.json.encode(body))
+end
+
+-- Adam's answer to a proposal, bound to its nonce ON DISK.
+function FX.writeBatchDecision(id, verdict, grantMerge, note)
+  local b = core.parseBatch(FX.readFile(FX.FLEET_DIR .. "/" .. id .. ".json"))
+  if not b or b.phase ~= "proposed" then return false end
+  local body = core.json.encode({ nonce = b.nonce, verdict = verdict, grantMerge = grantMerge and true or false, note = note or "" })
+  return FX.writeFileAtomic(FX.FLEET_DIR .. "/" .. id .. ".decision", body), b
+end
+
+function FX.fleetMsg(text)
+  local ok, p = pcall(function() return core.json.decode(tostring(text or "")) end)
+  if ok and type(p) == "table" and type(p.id) == "string" and p.id:match("^b%w+$") then return p end
+  return nil
+end
+
+function FX.batchApprove(driverKey, text)
+  local p = FX.fleetMsg(text)
+  if not p then return false end
+  local state = FX.fleetState(p.id)
+  if state.grant then FX.mergeAlert("⚠️ That batch was already answered"); return false end
+  local ok, b = FX.writeBatchDecision(p.id, "approve", p.grantMerge == true, "")
+  if not ok then FX.mergeAlert("⚠️ That batch proposal is gone"); return false end
+  state.grant = { approved = true, grantMerge = p.grantMerge == true, at = FX.now() }
+  FX.saveFleetState(p.id)
+  FX.mergeAlert("⇉ Batch approved: " .. b.title .. (state.grant.grantMerge and " -- merges on its grant" or " -- you merge each unit"))
+  return true
+end
+
+function FX.batchDeny(driverKey, text)
+  local p = FX.fleetMsg(text)
+  if not p then return false end
+  local state = FX.fleetState(p.id)
+  if state.grant then return false end
+  local ok, b = FX.writeBatchDecision(p.id, "deny", false, core.capChars(tostring(p.note or ""), 500))
+  if not ok then return false end
+  state.grant = { denied = true, at = FX.now() }
+  FX.saveFleetState(p.id)
+  FX.mergeAlert("✋ Batch denied: " .. b.title)
+  return true
+end
+
+-- Stop: no more tabs, no merges on the grant. Also honours cc-fleet.sh stop's <id>.stop marker.
+function FX.batchStop(driverKey, id)
+  if type(id) ~= "string" or not id:match("^b%w+$") then return false end
+  FX.writeFile(FX.FLEET_DIR .. "/" .. id .. ".stop", "")
+  local state = FX.fleetState(id)
+  state.grant = state.grant or {}
+  state.grant.stopped = true
+  FX.saveFleetState(id)
+  FX.mergeAlert("⏹ Batch stopped -- no more tabs, and no merges on its grant")
+  return true
+end
+
+-- The batch (if any) whose grant lets this merge request through on its own.
+function FX.fleetDelegates(r)
+  for id, b in pairs(FX._fleetBatches or {}) do
+    if b.commonDir == r.commonDir then
+      local state = FX.fleetState(id)
+      if core.fleetDelegatedMerge(b, state.grant, state, r) then return b end
+    end
+  end
+  return nil
+end
+
+-- Open a unit's tab: an empty Claude tab in the repo's window; FX.fleetTabPoll then finds the
+-- new session. One tab opening per repo at a time, so two new sessions can't be confused.
+function FX.fleetOpenTab(b, slug, req)
+  local state = FX.fleetState(b.id)
+  FX._fleetTabs[b.id .. "|" .. slug] = { before = FX.readSessions(), at = FX.now(), nonce = req.nonce, repo = b.repo }
+  state.units[slug] = state.units[slug] or {}
+  state.units[slug].opening = FX.now()
+  FX.saveFleetState(b.id)
+  print("[cc-dashboard] 🚀 opening unit " .. slug .. "'s tab for batch " .. b.id .. " in " .. b.repo)
+  pcall(function() FX.openClaudeTab({ root = b.repo, editor = "vscode", prompt = "", label = "unit " .. slug }) end)
+  if not FX._fleetTimer then
+    FX._fleetTimer = hs.timer.doEvery(1, function()
+      for key in pairs(FX._fleetTabs) do
+        local id, s = key:match("^(.-)|(.+)$")
+        FX.fleetTabPoll(id, s)
+      end
+      if next(FX._fleetTabs) == nil and FX._fleetTimer then FX._fleetTimer:stop(); FX._fleetTimer = nil end
+    end)
+  end
+end
+
+function FX.fleetTabPoll(id, slug)
+  local key = id .. "|" .. slug
+  local t = FX._fleetTabs[key]
+  if not t then return end
+  local b = FX._fleetBatches[id] or core.parseBatch(FX.readFile(FX.FLEET_DIR .. "/" .. id .. ".json"))
+  local state = FX.fleetState(id)
+  local function finish(body)
+    FX._fleetTabs[key] = nil
+    if state.units[slug] then state.units[slug].opening = nil end
+    FX.saveFleetState(id)
+    FX.fleetAnswer(id, slug, body)
+  end
+  if not b then return finish({ nonce = t.nonce, ok = false, reason = "the batch is gone" }) end
+  local s, why = core.newTabSession(t.before, FX.readSessions(), t.repo)
+  if s then
+    local host, ppid = FX.fleetRepoHost(t.repo), nil
+    pcall(function() ppid = (hs.execute("ps -o ppid= -p " .. tostring(math.floor(tonumber(s.pid) or 0))) or ""):match("%d+") end)
+    if host and ppid ~= host then
+      return finish({ nonce = t.nonce, ok = false, reason = "a new session appeared in " .. t.repo .. " but not in its VS Code window" })
+    end
+    local unit
+    for _, u in ipairs(b.units) do if u.slug == slug then unit = u end end
+    state.units[slug] = { session = { id = s.sessionId, name = s.name, pid = tostring(s.pid) } }
+    print("[cc-dashboard] ✅ unit " .. slug .. " of batch " .. id .. " is session " .. tostring(s.name))
+    return finish({ nonce = t.nonce, ok = true, name = s.name, sessionId = s.sessionId, pid = tostring(s.pid),
+                    message = core.fleetUnitMessage(b, unit) })
+  end
+  if (why and why:find("at once", 1, true)) or FX.now() - t.at >= FX.FLEET_TAB_WAIT then
+    return finish({ nonce = t.nonce, ok = false, reason = why and why:find("at once", 1, true) and why
+                    or "the new tab's session never appeared (is the repo's VS Code window open?)" })
+  end
+end
+
+-- Tick: the driver's card, one alert per proposal, tab requests, Stop markers.
+function FX.annotateFleet(list, cfg, bannerOn)
+  for _, it in ipairs(list or {}) do it.fleet = nil end
+  if core.config(cfg, "fleet.enabled", true) == false then FX._fleetBatches = {}; return end
+  local batches = FX.readFleet()
+  FX._fleetBatches = batches
+  if next(batches) == nil then return end
+  local byKey, byPid, opening = {}, {}, {}
+  for _, it in ipairs(list or {}) do
+    if it.key and not it.remote then
+      byKey[it.key] = it
+      if it.session_pid then byPid[tostring(it.session_pid)] = it end
+    end
+  end
+  for _, t in pairs(FX._fleetTabs) do opening[t.repo] = true end
+  local now = FX.now()
+  for id, b in pairs(batches) do
+    local state = FX.fleetState(id)
+    if FX.readFile(FX.FLEET_DIR .. "/" .. id .. ".stop") and not (state.grant and state.grant.stopped) then
+      state.grant = state.grant or {}
+      state.grant.stopped = true
+      FX.saveFleetState(id)
+    end
+    for _, u in ipairs(b.units) do
+      local reqFile = FX.FLEET_DIR .. "/" .. id .. ".tab-" .. u.slug .. ".json"
+      local raw = FX.readFile(reqFile)
+      if raw and not FX._fleetTabs[id .. "|" .. u.slug] then
+        local ok, req = pcall(function() return core.json.decode(raw) end)
+        if ok and type(req) == "table" and type(req.nonce) == "string" and not FX._fleetAnswered[req.nonce] then
+          local fine, why = core.fleetTabVerdict(b, state.grant, state, { session_id = req.session_id, slug = u.slug })
+          if not fine then
+            FX.fleetAnswer(id, u.slug, { nonce = req.nonce, ok = false, reason = why })
+          elseif not opening[b.repo] then
+            opening[b.repo] = true
+            FX.fleetOpenTab(b, u.slug, req)
+          end
+        end
+      end
+    end
+    for key in pairs(FX._fleetTabs) do
+      local kid, s = key:match("^(.-)|(.+)$")
+      if kid == id then FX.fleetTabPoll(kid, s) end
+    end
+    local it = byKey[b.driver.session_id] or (b.driver.pid ~= "" and byPid[b.driver.pid]) or nil
+    if it then
+      local view = core.batchView(b, state.grant, state)
+      local recent = now - ((state.grant and state.grant.at) or b.at) < 600
+      if view.phase == "proposed" or view.phase == "approved" or recent then
+        view.at = b.at
+        if not it.fleet or (it.fleet.at or 0) < b.at then it.fleet = view end
+      end
+      if view.needsYou and not FX._fleetAlerted[b.nonce] then
+        FX._fleetAlerted[b.nonce] = true
+        local name = tostring(it.label or it.name or "a session")
+        FX.mergeAlert(view.line .. "  (" .. name .. ") -- review it on its card")
+        if bannerOn then FX.notify("Shepherd · " .. name, view.line, { key = it.key }) end
+      end
+    end
+  end
+end
+
 -- ---- Tab-less sessions (2026-09-11) -----------------------------------------------
 -- A claude process left running with no tab (a new conversation started in its tab) is
 -- marked it.tabless once the mismatch has held for FX.TABLESS_AFTER seconds (a tab's name
@@ -2938,6 +3195,17 @@ function FX.annotateMerges(list, cfg, bannerOn)
     if it then reqs[key], items[key] = r, it end
   end
   FX._mergeReqs, FX._mergeItems = reqs, items
+  -- Batch driving (2026-09-11): a unit's OWN ready request is approved on its batch's grant
+  -- (only when Adam granted merges); anything else waits for his click as usual.
+  for key, r in pairs(reqs) do
+    if r.phase == "requested" and not FX._mergeApproved[key] and not FX._mergeSent[key] then
+      local b = FX.fleetDelegates(r)
+      if b and core.mergeReadiness(r, FX.mergeFacts(r), items[key]).ready then
+        FX._mergeApproved[key] = { nonce = r.nonce, at = FX.now(), delegated = true }
+        FX.mergeAlert("⇡ merging " .. r.branch .. " on your batch grant (\"" .. b.title .. "\")")
+      end
+    end
+  end
   local q = core.mergeQueue(reqs, FX._mergeApproved, FX._mergeSent, FX.now())
   for _, d in ipairs(q.drop) do
     if d.kind == "sent" then FX._mergeSent[d.key] = nil else FX._mergeApproved[d.key] = nil end
@@ -5881,6 +6149,14 @@ local function handleBridgeMsg(msg)
   if a == "merge-hold" then FX.mergeHold(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "merge-diff" then FX.mergeDiff(tostring(payload.v or "")); return end
   if a == "end-session" then FX.endSession(tostring(payload.v or "")); return end   -- tab-less only (verdict in core)
+  -- Batch driving (2026-09-11): v = the driver's key, text = JSON {id, grantMerge, note}
+  if a == "batch-approve" then FX.batchApprove(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  if a == "batch-deny" then FX.batchDeny(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  if a == "batch-stop" then
+    local p = FX.fleetMsg(payload.text)
+    if p then FX.batchStop(tostring(payload.v or ""), p.id) end
+    return
+  end
   if a == "open-hidden-view" then
     -- The restore list. Sends only what the row needs to identify a session --
     -- never a prompt body (the panel's audit view owns content, this doesn't).
@@ -7480,6 +7756,13 @@ local HTML = [[
      red escalate ring still wins when a tile is somehow both. */
   .tile.hung { box-shadow:0 0 0 2px var(--purple), 0 0 10px var(--purple); }
   .tile.escalate { box-shadow:0 0 0 2px var(--danger), 0 0 12px var(--danger); }
+  #d-batch { display:none; margin:6px 0; padding:8px 10px; border:1px solid #14b8a6; border-radius:8px; font-size:12px; }
+  #d-batch .dm-head { font-weight:600; }
+  #d-batch .dm-sub { opacity:.85; margin-top:3px; white-space:pre-wrap; }
+  #d-batch ul { margin:4px 0 0 16px; padding:0; max-height:140px; overflow:auto; }
+  #d-batch label { display:block; margin-top:6px; }
+  #d-batch .dm-acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; align-items:center; }
+  #d-batch .dm-acts input { flex:1; min-width:120px; }
   #d-tabless { display:none; margin:6px 0; padding:6px 10px; border:1px dashed var(--warn); border-radius:8px; font-size:12px; }
   /* a merge request waiting for you (or one that came back blocked) */
   .tile.merge { box-shadow:0 0 0 2px #14b8a6, 0 0 10px #14b8a6; }
@@ -8617,6 +8900,20 @@ local HTML = [[
       <span id="d-status"></span>
     </div>
     <div id="d-shared"></div>
+    <!-- Batch driving (2026-09-11): a batch this session proposes or drives; filled with textContent
+         only; the note and the checkbox are never rebuilt by a re-render. -->
+    <div id="d-batch">
+      <div class="dm-head" id="db-head"></div>
+      <div class="dm-sub" id="db-sub"></div>
+      <ul id="db-units"></ul>
+      <label id="db-mergewrap"><input type="checkbox" id="db-merge"> Claude may merge these when green (each still passes Shepherd's own git check, one per repo at a time)</label>
+      <div class="dm-acts" id="db-acts">
+        <button id="db-approve" onclick="batchAct('batch-approve')" title="Let Claude open these units' tabs and hand them their tasks">Approve batch</button>
+        <input id="db-note" maxlength="500" placeholder="Note for Claude (optional)">
+        <button id="db-deny" onclick="batchAct('batch-deny')">Deny</button>
+      </div>
+      <div class="dm-acts" id="db-live"><button id="db-stop" onclick="batchAct('batch-stop')" title="No more tabs, and no merges on this batch's grant">Stop batch</button></div>
+    </div>
     <div id="d-tabless"><span id="dt-text"></span> <button id="b-endsess" onclick="endSessionFor(selectedKey)" title="Stop this leftover claude process (asks first)">End session</button></div>
     <!-- Ready to merge (2026-09-11): a fixed skeleton that renderMerge fills with
          textContent only; the note input is never rebuilt, so a half-typed note survives. -->
@@ -12342,6 +12639,38 @@ local HTML = [[
     var TABLESS_T = "⊘ no tab — a leftover process, or the Claude sidebar";
     var END_CONFIRM = "End this session's leftover claude process? It has no tab in its VS Code window. Its chat is saved and can be resumed.";
     function endSessionFor(k){ if(k && confirm(END_CONFIRM)) send("end-session", k); }
+    // ---- Batch driving (2026-09-11): the batch review on the driver's detail panel ----
+    var BATCH_ID = null;
+    function renderBatch(it){
+      var box = document.getElementById("d-batch");
+      if(!box) return;
+      var b = it && it.fleet;
+      if(!b || !b.id){ box.style.display = "none"; BATCH_ID = null; return; }
+      box.style.display = "block";
+      var fresh = BATCH_ID !== b.id;
+      BATCH_ID = b.id;
+      document.getElementById("db-head").textContent = (b.line || "") + (b.title ? " — " + b.title : "");
+      document.getElementById("db-sub").textContent = b.phase === "proposed"
+        ? "Approving lets Claude open these units' tabs in " + (b.repo || "the repo") + "'s window and hand them their tasks. Each unit still asks to merge."
+        : (b.phase === "approved" ? "Approved" + (b.grantMerge ? ", with merges on its grant." : "; you merge each unit.") : "");
+      var units = Array.isArray(b.units) ? b.units : [];
+      mergeFillList(document.getElementById("db-units"), units, function(u){
+        return (u.branch || "") + (u.session ? "  ⇢ " + u.session : (u.opening ? "  (opening its tab…)" : "")) + " — " + (u.task || "");
+      });
+      var proposed = b.phase === "proposed";
+      document.getElementById("db-mergewrap").style.display = proposed ? "" : "none";
+      document.getElementById("db-acts").style.display = proposed ? "flex" : "none";
+      document.getElementById("db-live").style.display = b.phase === "approved" ? "flex" : "none";
+      if(fresh) document.getElementById("db-merge").checked = !!b.mergeWhenGreen;
+    }
+    function batchAct(a){
+      if(!selectedKey || !BATCH_ID) return;
+      if(a === "batch-stop" && !confirm("Stop this batch? Claude can't open more of its tabs, and no more merges go through on its grant.")) return;
+      var note = document.getElementById("db-note");
+      send(a, selectedKey, JSON.stringify({ id: BATCH_ID, grantMerge: !!document.getElementById("db-merge").checked,
+                                            note: a === "batch-deny" ? (note.value || "") : "" }));
+      if(a === "batch-deny") note.value = "";
+    }
     function mergeFactsLine(m){
       var parts = [];
       if(m.ahead > 0) parts.push(m.ahead + " commit" + (m.ahead === 1 ? "" : "s") + " ahead of " + (m.base || "main"));
@@ -12502,6 +12831,7 @@ local HTML = [[
         dsh.style.display = shared ? "block" : "none";
       }
       renderMerge(it);
+      renderBatch(it);
       var dtl = document.getElementById("d-tabless");
       if(dtl){
         dtl.style.display = it.tabless ? "block" : "none";
@@ -14678,6 +15008,8 @@ local HTML = [[
              + (it.error_message || "API error — stopped");
       } else if(it.merge && it.merge.line){
         meta = it.merge.line;   // ready to merge / queued / merging / blocked (core.mergeLine)
+      } else if(it.fleet && it.fleet.line){
+        meta = it.fleet.line;   // a batch this session proposes or drives (core.batchView)
       } else if(it.tabless){
         meta = TABLESS_T;   // a claude process with no tab in its window (2026-09-11)
       }
@@ -14692,7 +15024,7 @@ local HTML = [[
       if(it.hung){ meta = (meta ? meta + " · " : "") + "⏳ stalled"; }
       if(it.looping){ meta = (meta ? meta + " · " : "") + "⟳ looping"; }   // L5 loop watchdog
       if(it.churn){ meta = (meta ? meta + " · " : "") + "♻️" + it.churn; }   // respawn/clear churn today
-      var cls = "tile s-" + stCls + (it.stale && !bgRunning(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (it.merge && it.merge.needsYou ? " merge" : "") + (it.key === selectedKey ? " sel" : "");
+      var cls = "tile s-" + stCls + (it.stale && !bgRunning(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + ((it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou) ? " merge" : "") + (it.key === selectedKey ? " sel" : "");
       // select + double-click jump are decided at mousedown by onGridMouseDown (below):
       // a grid rebuild mid-press detaches the tile, so inline click handlers were lost
       // data-stack: this card's project stack (focus-group + the Instances button read it)
@@ -16367,6 +16699,7 @@ function FX._refreshBody()
   FX.annotateStacks(list, labels, cfg)
   -- Ready to merge (2026-09-11): after the stacks (readiness compares the session's current
   -- worktree) and before the stack ranking (a request waiting for Adam leads its card).
+  FX.annotateFleet(list, cfg, bannerOn)    -- batch driving (2026-09-11): before merges (delegation)
   FX.annotateMerges(list, cfg, bannerOn)
   FX.annotateTabless(list, cfg)   -- a claude process with no tab in its window (2026-09-11)
   -- Two sessions in ONE project used to render as IDENTICAL cards: the name (and

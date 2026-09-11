@@ -47,6 +47,11 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want merges I approve in one repo to run one at a time in the order I clicked, so that parallel units never race each other into main.
 - As a **developer**, I want Not yet to send my note back to the waiting tab, so that it can fix what I saw before asking again.
 - As a **fleet operator**, I want a merged unit's tab to close by itself once Shepherd has confirmed the merge, so that finished tabs don't pile up in the window.
+- As a **fleet operator**, I want a leftover claude process with no tab marked on its card with End session, so that it stops passing for a second tab and blocking the real one.
+- As a **developer**, I want Jump to bring a session's own tab to the front, so that I land on the chat I meant in a window with several tabs.
+- As a **developer**, I want to let a Claude session drive a batch of worktree units on my single approval, so that parallel work doesn't need me to open tabs, press Return and click every merge.
+- As a **fleet operator**, I want to decide in the batch approval whether Claude may merge its units when green, so that I keep the last word on main when I want it.
+- As a **fleet operator**, I want a batch's merge permission to cover only each unit's own session and branch, and Stop batch to revoke it at once, so that the grant can't be stretched.
 
 ## Session observability
 

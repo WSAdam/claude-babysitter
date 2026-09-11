@@ -141,7 +141,7 @@ install_file() {
 }
 
 # 1. Scripts + core -> ~/.claude ; dashboard + core -> ~/.hammerspoon.
-for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-core.lua; do
+for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-core.lua; do
   install_file "$HERE/$f" "$CLAUDE_DIR"
 done
 chmod +x "$CLAUDE_DIR"/cc-*.sh

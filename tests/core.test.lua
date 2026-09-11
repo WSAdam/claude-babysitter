@@ -7905,7 +7905,8 @@ do
   -- 2026-09-10: 7 -> 8 for project cards & instances ("stacks", flagged new).
   -- 2026-09-10: 8 -> 9 for the shared-window keystroke guard ("sharedwin", flagged new).
   -- 2026-09-11: 9 -> 10 for the ready-to-merge flow ("merge", flagged new).
-  eq("FEATURES: the 10 new features are flagged", newCount, 10)
+  -- 2026-09-11: 10 -> 11 for batch driving ("fleet", flagged new).
+  eq("FEATURES: the 11 new features are flagged", newCount, 11)
 end
 
 -- F4: transcript peek (user + assistant rows, chronological, noise filtered)
@@ -9029,6 +9030,86 @@ do
   local mv = core.mergeView(mg, nil, nil, { closeNote = "close its tab yourself: 2 Claude tabs share its name" })
   eq("card: merged, but the tab can't be closed for it",
      core.mergeLine(mv), "✓ merged fix/demo into main -- close its tab yourself: 2 Claude tabs share its name")
+end
+
+-- ---- Batch driving: a Claude session drives worktree units on Adam's one approval (2026-09-11) --
+-- cc-fleet.sh writes ~/.claude/cc-fleet/<id>.json; Adam approves the batch once in Shepherd;
+-- the grant lives in Shepherd's own state (never the proposal's word). The driver asks for each
+-- unit's tab and Shepherd works out which new session is that tab; a delegated merge only goes
+-- through for that unit's own session on its own branch.
+do
+  local function bj(over)
+    local t = { v = 1, id = "b1757", nonce = "n1", driver = { session_id = "drv", pid = "4242", name = "repo-drv" },
+                repo = "/r/main", commonDir = "/r/main/.git", title = "Two helpers", mergeWhenGreen = true,
+                units = { { type = "feat", slug = "alpha", task = "Add alpha.", branch = "feat/alpha" },
+                          { type = "fix", slug = "beta", task = "Fix beta.", branch = "fix/beta" } },
+                at = 100, phase = "proposed" }
+    for k, v in pairs(over or {}) do if v == false then t[k] = nil else t[k] = v end end
+    return core.json.encode(t)
+  end
+  local b = core.parseBatch(bj())
+  check("batch: a well-formed proposal parses", b ~= nil and #b.units == 2 and b.units[1].branch == "feat/alpha")
+  for what, over in pairs({
+    ["garbage"] = "junk", ["an unsafe id"] = { id = "../b1" }, ["no driver"] = { driver = false },
+    ["a relative repo"] = { repo = "main" }, ["a common dir that isn't the repo's"] = { commonDir = "/elsewhere/.git" },
+    ["a unit branch that isn't type/slug"] = { units = { { type = "feat", slug = "a", task = "t", branch = "main" } } },
+    ["an unknown type"] = { units = { { type = "chore", slug = "a", task = "t", branch = "chore/a" } } },
+    ["a bad slug"] = { units = { { type = "feat", slug = "A B", task = "t", branch = "feat/A B" } } },
+    ["no units"] = { units = {} }, ["an unknown phase"] = { phase = "exploded" },
+  }) do
+    check("batch: refuses " .. what, core.parseBatch(type(over) == "string" and over or bj(over)) == nil)
+  end
+
+  local grant = { approved = true, grantMerge = true }
+  local req = { session_id = "drv", slug = "alpha" }
+  check("tab: the driver may open an approved unit's tab", core.fleetTabVerdict(b, grant, {}, req) == true)
+  local ok, why = core.fleetTabVerdict(b, nil, {}, req)
+  check("tab: not before Adam approves  (" .. tostring(why) .. ")", ok == false and why:find("approved", 1, true))
+  ok, why = core.fleetTabVerdict(b, grant, {}, { session_id = "other", slug = "alpha" })
+  check("tab: not for another session  (" .. tostring(why) .. ")", ok == false and why:find("proposed", 1, true))
+  ok = core.fleetTabVerdict(b, grant, {}, { session_id = "drv", slug = "gamma" })
+  check("tab: not for a unit outside the batch", ok == false)
+  ok = core.fleetTabVerdict(b, grant, { units = { alpha = { session = { name = "x" } } } }, req)
+  check("tab: once per unit", ok == false)
+  ok = core.fleetTabVerdict(b, { approved = true, stopped = true }, {}, req)
+  check("tab: never on a stopped batch", ok == false)
+
+  local before = { ["100"] = { pid = 100, sessionId = "old", name = "main-old", cwd = "/r/main" } }
+  local after = { ["100"] = before["100"], ["200"] = { pid = 200, sessionId = "new", name = "main-9f", cwd = "/r/main" },
+                  ["300"] = { pid = 300, sessionId = "else", name = "other", cwd = "/r/other" } }
+  local s = core.newTabSession(before, after, "/r/main")
+  eq("new tab: the one new session in the repo root is the tab", s and s.name, "main-9f")
+  after["400"] = { pid = 400, sessionId = "new2", name = "main-aa", cwd = "/r/main" }
+  local s2, why2 = core.newTabSession(before, after, "/r/main")
+  check("new tab: two new sessions there -- can't tell which, refused  (" .. tostring(why2) .. ")", s2 == nil)
+  check("new tab: none yet -> nil (keep waiting)", core.newTabSession(before, before, "/r/main") == nil)
+
+  local msg = core.fleetUnitMessage(b, b.units[1])
+  check("unit message: enters its worktree and renames the branch",
+        msg:find('EnterWorktree with name "alpha"', 1, true) and msg:find("git branch -m feat/alpha", 1, true))
+  check("unit message: carries the task, the finish protocol and who to report to",
+        msg:find("Add alpha.", 1, true) and msg:find("cc-merge.sh request", 1, true) and msg:find("repo-drv", 1, true))
+
+  local state = { units = { alpha = { session = { id = "s-a1", name = "main-a1" } } } }
+  check("delegated merge: the unit's own session on its own branch",
+        core.fleetDelegatedMerge(b, grant, state, { session_id = "s-a1", branch = "feat/alpha" }) == true)
+  check("delegated merge: not on another branch",
+        not core.fleetDelegatedMerge(b, grant, state, { session_id = "s-a1", branch = "fix/beta" }))
+  check("delegated merge: not for a session that isn't a unit's",
+        not core.fleetDelegatedMerge(b, grant, state, { session_id = "intruder", branch = "feat/alpha" }))
+  check("delegated merge: not when Adam withheld merge permission",
+        not core.fleetDelegatedMerge(b, { approved = true, grantMerge = false }, state, { session_id = "s-a1", branch = "feat/alpha" }))
+  check("delegated merge: not on a stopped batch",
+        not core.fleetDelegatedMerge(b, { approved = true, grantMerge = true, stopped = true }, state, { session_id = "s-a1", branch = "feat/alpha" }))
+
+  local v = core.batchView(b, nil, {})
+  eq("card: a proposal waiting for Adam", v.line, "⇉ proposes 2 units in main")
+  check("...needs him", v.needsYou == true)
+  v = core.batchView(b, grant, state)
+  eq("card: approved with merges delegated", v.line, "⇉ driving 2 units in main · merges delegated")
+  check("...doesn't need him, and the units show their sessions", v.needsYou == false and v.units[1].session == "main-a1")
+  eq("card: stopped", core.batchView(b, { approved = true, stopped = true }, state).line, "⇉ batch stopped: Two helpers")
+  eq("tier: a batch proposal needs you", core.instanceTier({ key = "drv", status = "done", since = 1, fleet = core.batchView(b, nil, {}) }, {}), 1)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

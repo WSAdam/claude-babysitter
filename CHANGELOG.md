@@ -4,6 +4,25 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — Claude drives a batch
+
+### Added — worktree units on one approval
+
+A Claude session can now drive several worktree units itself, with Adam's permission given once
+per batch. `~/.claude/cc-fleet.sh propose` (run in the background) validates the batch — 1-8 units,
+types, names, tasks, no existing branch or worktree — and writes a proposal Shepherd shows on the
+driver's card, with a review and a "Claude may merge these when green" checkbox. Adam's answer is a
+decision bound to the proposal's nonce, and the grant is kept in Shepherd's own state. Approved,
+`cc-fleet.sh tab` has Shepherd open an empty Claude tab in the repo's window and identify its new
+session (the one new `~/.claude/sessions` entry in the repo root under that window's host, one
+opening per repo at a time); the driver hands the unit its task with SendMessage and hears back when
+it's idle. With merge permission, a unit's own ready merge request is approved on the grant (its own
+session, its own branch, Shepherd's readiness check, the per-repo queue); without it, units wait for
+Adam's Merge. Stop batch revokes everything. Fixtures: `tests/fleet.test.sh` (the CLI),
+`tests/core.test.lua` (proposal parsing, grant verdicts, new-tab identification, delegated merges,
+the card) and the behavioral `tests/fleet.test.lua` (one alert, nonce-bound approval, a tab answered
+with its session, a delegated merge for the unit only, Stop).
+
 ## 2026-09-11 — Jump lands on the session's own tab
 
 ### Added — the tab bridge brings a tab to the front

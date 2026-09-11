@@ -163,6 +163,16 @@ pure tab switching, so D-14's resume-a-live-session risk can't arise. A wrong pi
 another tab, so select may use any of a session's names; **close keeps the strict one**. Any window
 still on an older bridge just lands on the window (Doctor says to reload it). **[DECISION D-17]**
 
+A Claude session may **drive a batch** of worktree units, and Adam's permission is **one approval per
+batch**. The session proposes it with `cc-fleet.sh propose`; the review on its card carries a
+"Claude may merge these when green" box. The grant is recorded in Shepherd's own state file —
+the proposal file is the session's and is never trusted for permission. Approved, Shepherd opens each unit's
+tab on the driver's request (an empty Claude tab, then the one new session in the repo root whose
+parent is that window's extension host — one opening per repo at a time); the driver hands the unit
+its task with SendMessage, which runs under the unit's own permissions. Merges go through on the
+grant only for a unit's **own session on its own branch** and only after Shepherd's readiness
+check; everything else still waits for Adam's click. Stop ends the grant at once. **[DECISION D-18]**
+
 ## 6. Observability (local, derived, zero extra hooks)
 
 All from the transcript Shepherd already tails — **no extra hooks, no model tokens**:

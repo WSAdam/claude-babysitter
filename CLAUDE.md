@@ -72,6 +72,11 @@ and the README's "Testing & development" section.
   post-merge check use Shepherd's own git (`core.mergeFactsCmd`, `core.mergeVerifyCmd`), never
   the session's word; the tab closes only after both. A new per-key merge file goes in BOTH
   `cc_remove` and `FX.removeStatus`.
+- Batch driving (`cc-fleet.sh`, `~/.claude/cc-fleet/`): Adam's grant lives in Shepherd's own
+  `<id>.state.json` (`FX.fleetState`) -- never read permission from the proposal file, which
+  the session writes. Tabs open one per repo at a time (that's what makes `core.newTabSession`
+  unambiguous); merges on a grant go only through `core.fleetDelegatedMerge` (the unit's own
+  session and branch) plus the normal readiness check and queue.
 - Scripts reach `~/.claude` by RENAME (`make install`, `install.sh`): bash reads a running
   script lazily, so rewriting one in place garbles a hook that's mid-run.
 - `vscode://anthropic.claude-code/open?prompt=` opens a new Claude tab in the ACTIVE editor

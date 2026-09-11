@@ -392,6 +392,7 @@ assert_eq "make install: ships cc-merge.sh, executable" "yes" "$got"
 ls -a "$MCDIR" | grep -q '\.tmp\.' && got=leftovers || got=clean
 assert_eq "make install: leaves no temp files behind" "clean" "$got"
 exists "install.sh: ships cc-merge.sh too" "$CDIR/cc-merge.sh"
+exists "install.sh: ships cc-fleet.sh too" "$CDIR/cc-fleet.sh"
 
 # ---- make reload never blocks a deploy (2026-09-11) ----
 # The reload drops Hammerspoon's IPC port; an `hs -c` caught mid-reply then waited forever
