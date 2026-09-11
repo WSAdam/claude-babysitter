@@ -1498,9 +1498,9 @@ function M.mergeReadiness(req, facts, item)
   end
   if not facts.clean then p[#p + 1] = "uncommitted changes in the worktree (" .. #(facts.dirty or {}) .. " file(s))" end
   if (tonumber(facts.ahead) or 0) <= 0 then p[#p + 1] = "nothing to merge: 0 commits ahead of " .. req.base end
-  if type(item) == "table" and type(item.wtRoot) == "string" and M.normDir(item.wtRoot) ~= req.worktree then
-    p[#p + 1] = "the session has left that worktree"
-  end
+  -- (2026-09-11: no "the session left that worktree" rule any more -- a fenced tab now leaves
+  -- its worktree to ask, so Claude Code's worktree guard never has to judge cc-merge.sh. The
+  -- worktree itself is still checked above: listed, on its branch, clean, ahead.)
   out.ready = (#p == 0)
   return out
 end
@@ -1709,8 +1709,9 @@ function M.fleetUnitMessage(batch, unit)
   local who = (batch.driver.name ~= "" and batch.driver.name) or "the session that sent this"
   return M.worktreeTabPrompt({ branch = unit.branch, slug = unit.slug }, "Task: " .. unit.task)
     .. "\n\nThis is unit " .. unit.branch .. " of the batch \"" .. batch.title .. "\" that Adam approved in Shepherd. "
-    .. "When the unit is done, finish it with the ready-to-merge protocol in the global CLAUDE.md "
-    .. "(~/.claude/cc-merge.sh request, in the background) and follow its answer. "
+    .. "When the unit is done (suite green, everything committed), finish it with the ready-to-merge "
+    .. "protocol in the global CLAUDE.md: ExitWorktree (keep) first, then from the main checkout run "
+    .. "~/.claude/cc-merge.sh request --worktree <the worktree's path> ... in the background, and follow its answer. "
     .. "Report to " .. who .. " with SendMessage when you've asked for the merge, and again when it has merged or blocked."
 end
 

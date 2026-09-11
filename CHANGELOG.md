@@ -4,6 +4,22 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — A unit asks to merge from outside its worktree
+
+### Fixed — Claude Code's worktree guard refused the merge request inside a fenced tab
+
+In the first batch run, both unit tabs finished and committed, then Claude Code's worktree-isolation
+guard refused `~/.claude/cc-merge.sh request` twice in each ("cannot be shown not to be git"): it
+judges the script, which runs git. The units rightly stopped instead of working around it. A fenced
+tab now leaves its worktree first and asks from the main checkout with `--worktree <path>` —
+nothing runs inside the guard — and the approval's steps start with `EnterWorktree` back into the
+worktree to rebase. `--worktree` refuses the main checkout, a folder outside any repo, and another
+repo's worktree. Requirement change: Shepherd's readiness no longer flags "the session has left that
+worktree" (asking from the main checkout is now the normal case; the worktree itself is still
+checked — listed, on its branch, clean, ahead). Fixtures: `tests/merge.test.sh` (asking from the
+main checkout; the refusals — red before: `--worktree` was an unknown option) and
+`tests/core.test.lua`.
+
 ## 2026-09-11 — Claude drives a batch
 
 ### Added — worktree units on one approval

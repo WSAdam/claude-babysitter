@@ -194,8 +194,11 @@ per project**, not one per session.
 ### Ready to merge
 
 A worktree tab that has finished its unit (suite green, everything committed) asks for a merge
-instead of merging on its own: it runs `~/.claude/cc-merge.sh request --summary "…" --tests "…"`
-**in the background** and ends its turn, and Claude Code wakes it when you answer.
+instead of merging on its own: it leaves its worktree (`ExitWorktree`), then from the main checkout
+runs `~/.claude/cc-merge.sh request --worktree <its path> --summary "…" --tests "…"` **in the
+background** and ends its turn, and Claude Code wakes it when you answer. (Asking from inside a
+tab's worktree works too where nothing fences it, but Claude Code's worktree guard can refuse to
+run the script there — so fenced tabs ask from outside and step back in to rebase.)
 
 - **The card** says *⇡ ready to merge fix/x → main*, gets a teal ring, leads its project card like
   an approval does, and you get one alert (plus an OS banner if approval banners are on).

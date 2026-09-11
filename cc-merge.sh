@@ -43,13 +43,14 @@ update_req() { # <jq filter> [jq args...]
 }
 
 cmd_request() {
-  local summary="" tests="" base="main" waitmax=0
+  local summary="" tests="" base="main" waitmax=0 wtArg=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --summary)  summary="${2:-}"; shift 2 ;;
       --tests)    tests="${2:-}"; shift 2 ;;
       --base)     base="${2:-}"; shift 2 ;;
       --wait-max) waitmax="${2:-}"; shift 2 ;;
+      --worktree) wtArg="${2:-}"; shift 2 ;;
       *) refuse "unknown option: $1" ;;
     esac
   done
@@ -57,24 +58,39 @@ cmd_request() {
   [ -n "$tests" ] || refuse "--tests is required: the command you ran and its result"
   case "$waitmax" in ''|*[!0-9]*) refuse "--wait-max takes whole seconds" ;; esac
 
+  # Where the unit's worktree is: --worktree <path> when asking from the main checkout (the
+  # way a fenced tab asks: ExitWorktree first, so nothing runs inside Claude Code's worktree
+  # guard), else the worktree we're standing in.
   local wt common gitdir branch
-  wt="$(git rev-parse --show-toplevel 2>/dev/null)" || refuse "not inside a git repository"
-  common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
-  gitdir="$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)"
-  [ "$gitdir" != "$common" ] || refuse "this is the main checkout -- a unit merges FROM its own worktree"
-  branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" || refuse "the worktree is on a detached HEAD -- commit on a branch first"
-  git check-ref-format --branch "$base" >/dev/null 2>&1 && git rev-parse --verify --quiet "refs/heads/$base" >/dev/null \
+  if [ -n "$wtArg" ]; then
+    [ -d "$wtArg" ] || refuse "--worktree $wtArg isn't a folder"
+    wt="$(git -C "$wtArg" rev-parse --show-toplevel 2>/dev/null)" || refuse "--worktree $wtArg isn't inside a git repository"
+    local here
+    here="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+    common="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+    [ -z "$here" ] || [ "$here" = "$common" ] || refuse "--worktree $wtArg belongs to another repo than the one you're in"
+  else
+    wt="$(git rev-parse --show-toplevel 2>/dev/null)" || refuse "not inside a git repository (ask from the main checkout with --worktree <path>)"
+  fi
+  g() { git -C "$wt" "$@"; }
+  common="$(g rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  gitdir="$(g rev-parse --path-format=absolute --git-dir 2>/dev/null)"
+  [ "$gitdir" != "$common" ] || refuse "that's the main checkout -- a unit merges FROM its own worktree (--worktree <its path>)"
+  branch="$(g symbolic-ref --quiet --short HEAD 2>/dev/null)" || refuse "the worktree is on a detached HEAD -- commit on a branch first"
+  g check-ref-format --branch "$base" >/dev/null 2>&1 && g rev-parse --verify --quiet "refs/heads/$base" >/dev/null \
     || refuse "there's no local branch '$base' to merge into (--base)"
   [ "$branch" != "$base" ] || refuse "the worktree is on $base itself"
+  local inside=no
+  case "$(pwd -P)/" in "$wt"/*) inside=yes ;; esac
   local dirty
-  dirty="$(git status --porcelain 2>/dev/null)"
+  dirty="$(g status --porcelain 2>/dev/null)"
   if [ -n "$dirty" ]; then
     echo "❌ cc-merge: uncommitted changes in the worktree -- commit them (or drop them) first:"
     printf '%s\n' "$dirty" | head -n 10
     exit 2
   fi
   local ahead
-  ahead="$(git rev-list --count "refs/heads/$base..HEAD" 2>/dev/null)"
+  ahead="$(g rev-list --count "refs/heads/$base..HEAD" 2>/dev/null)"
   [ "${ahead:-0}" -gt 0 ] 2>/dev/null || refuse "nothing to merge: $branch has no commits that $base doesn't"
 
   local now hb
@@ -126,7 +142,8 @@ cmd_request() {
             update_req '.phase = "approved" | .approvedAt = $t' --argjson t "$(date +%s)"
             cat <<EOF
 MERGE APPROVED -- Adam approved merging $branch into $base. Now, in order:
-1. In this worktree, rebase on $base: git rebase $base
+$( [ "$inside" = yes ] || echo "0. EnterWorktree with path $wt (you asked from the main checkout) -- the rebase happens there." )
+1. In the worktree, rebase on $base: git rebase $base
    Conflicts: the tests are the oracle -- read both sides' tests and keep the resolution that
    satisfies both. If none does, it's a design question: run step 6's blocked form and stop.
 2. Run the full suite here; it must be green.
@@ -143,7 +160,7 @@ EOF
           fi
           rm -f "$REQ"
           echo "NOT YET: ${note:-(no note)}"
-          echo "Adam isn't ready to merge $branch. Act on the note, then ask again with the same request command."
+          echo "Adam isn't ready to merge $branch. Act on the note (EnterWorktree with path $wt to change it), then leave the worktree and ask again with the same request command."
           exit 3
         fi
         # Not ours: put it back untouched. If a new answer landed meanwhile, park this one.

@@ -8952,7 +8952,11 @@ do
   check("not ready: the worktree moved to another branch", (problem(with({ head = "fix/other" })) or ""):find("fix/other", 1, true))
   check("not ready: the worktree is gone from the repo", (problem(with({ listed = false })) or ""):find("isn't one of", 1, true))
   check("not ready: nothing ahead", (problem(with({ ahead = 0 })) or ""):find("nothing to merge", 1, true))
-  check("not ready: the session left that worktree", (problem(f, { key = "s1", wtRoot = "/r/main" }) or ""):find("left that worktree", 1, true))
+  -- 2026-09-11 requirement change (was "not ready: the session left that worktree"): a fenced
+  -- tab now leaves its worktree before asking, because Claude Code's worktree guard refused
+  -- cc-merge.sh run from inside it -- so asking from the main checkout is the normal case.
+  check("ready: a session that asked from the main checkout (it left its worktree to ask)",
+        core.mergeReadiness(r, f, { key = "s1", wtRoot = "/r/main" }).ready == true)
   check("ready: main having moved on is not a problem (the session rebases)", core.mergeReadiness(r, with({ behind = 9 }), item).ready)
 
   -- the queue: one merge per repo at a time, in click order

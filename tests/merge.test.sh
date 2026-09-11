@@ -137,6 +137,33 @@ answer s4 merge "" "$n1"
 wait $bg
 assert_eq "...and the first request's answer is honoured" "0" "$(cat "$TMP/rc.s4")"
 
+# ---- asking from OUTSIDE the worktree (2026-09-11) ----
+# 2026-09-11 E2E: Claude Code's worktree-isolation guard refused `cc-merge.sh request` run from
+# inside two fenced unit tabs ("cannot be shown not to be git") -- it judges the script, which
+# runs git. So a unit leaves its worktree (ExitWorktree) and asks from the main checkout, naming
+# the worktree; nothing runs inside the fence.
+unit outside fix/outside
+WTO="$(cd "$REPO/.claude/worktrees/outside" && pwd -P)"
+req "$REPO" o1 --worktree "$WTO" & bg=$!
+wait_for "$MD/o1.json"
+assert_json "from the main checkout, --worktree names the unit's worktree" "$MD/o1.json" .worktree "$WTO"
+assert_json "...and its branch" "$MD/o1.json" .branch fix/outside
+answer o1 merge
+wait $bg
+assert_eq "...approved: exit 0" "0" "$(cat "$TMP/rc.o1")"
+grep -q "EnterWorktree with path $WTO" "$TMP/out.o1" && got=yes || got=no
+assert_eq "...and the steps start by going back into the worktree to rebase" "yes" "$got"
+req "$REPO" o2 --worktree "$REPO"
+assert_eq "--worktree naming the main checkout is refused" "2" "$(cat "$TMP/rc.o2")"
+mkdir -p "$TMP/notgit"
+req "$REPO" o3 --worktree "$TMP/notgit"
+assert_eq "--worktree naming a folder outside any repo is refused" "2" "$(cat "$TMP/rc.o3")"
+OTHER="$TMP/other"; git init -q -b main "$OTHER"; printf 'y\n' > "$OTHER/y"
+git -C "$OTHER" add -A && git -C "$OTHER" -c user.email=t@example.invalid -c user.name=t commit -qm init
+git -C "$OTHER" worktree add -q "$OTHER/.claude/worktrees/x" -b fix/x
+req "$REPO" o4 --worktree "$OTHER/.claude/worktrees/x"
+assert_eq "--worktree of another repo than the one you're in is refused" "2" "$(cat "$TMP/rc.o4")"
+
 # ---- done ----
 done_() { (cd "$REPO" && CLAUDE_CODE_SESSION_ID="$1" bash "$M" done "${@:2}" > "$TMP/dout.$1" 2>&1; echo $? > "$TMP/drc.$1"); }
 done_ s1 --result merged
