@@ -191,6 +191,29 @@ per project**, not one per session.
 - `stacks.enabled: false` in `~/.claude/cc-config.json` switches back to one card per session.
   The Stream Deck stays one key per session.
 
+### Ready to merge
+
+A worktree tab that has finished its unit (suite green, everything committed) asks for a merge
+instead of merging on its own: it runs `~/.claude/cc-merge.sh request --summary "…" --tests "…"`
+**in the background** and ends its turn, and Claude Code wakes it when you answer.
+
+- **The card** says *⇡ ready to merge fix/x → main*, gets a teal ring, leads its project card like
+  an approval does, and you get one alert (plus an OS banner if approval banners are on).
+  Shepherd checks the request with **its own git** first — the worktree is one of the repo's, on
+  the requested branch, clean and ahead of main — and says what's wrong otherwise.
+- **The review** (the detail panel, or **Review** in the Instances view): the session's summary,
+  the tests it reports, how far ahead of main it is and whether main moved on, the commits, the
+  changed files, and **Full diff**.
+- **Merge** tells the waiting session to go: rebase on main (conflicts settled by the tests —
+  both sides' tests must pass, or it stops and reports *blocked*), run the suite, `ExitWorktree`,
+  `git merge --ff-only` in the main checkout, run the suite on main, then
+  `cc-merge.sh done --result merged`, which confirms the branch is in main and removes the
+  worktree and the branch — never forced. Merges in one repo run **one at a time, in the order you
+  clicked**; the rest show *queued (next in line)* and start on their own. **Not yet** sends your
+  note back, and the unit stays in its worktree.
+- No keystrokes: the request and your answer are files in `~/.claude/cc-merge/`, and the answer is
+  bound to the request it's for. `"merge": { "enabled": false }` makes Shepherd ignore requests.
+
 ## Control actions
 
 The **header** has **New** (opens the new-session modal — see "Spawn"), a **☕

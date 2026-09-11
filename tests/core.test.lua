@@ -8761,5 +8761,117 @@ do
   eq("window sessions: no folder, none", #core.windowSessionsFor(list, nil), 0)
 end
 
+-- ---- Ready to merge: a worktree tab asks, Adam approves in Shepherd (2026-09-11) ------
+-- cc-merge.sh writes ~/.claude/cc-merge/<key>.json and waits for a decision bound to its
+-- nonce. Shepherd checks the request with its OWN git (never the session's word), shows a
+-- review, and on Merge releases one merge per repo at a time, in the order Adam clicked.
+do
+  local function reqJson(over)
+    local t = { v = 1, key = "s1", session_id = "s1", pid = "4242", nonce = "11.100.7",
+                worktree = "/r/main/.claude/worktrees/demo", branch = "fix/demo", base = "main",
+                commonDir = "/r/main/.git", summary = "Fix the demo", tests = "make test: green",
+                ahead = 2, at = 100, phase = "requested" }
+    for k, v in pairs(over or {}) do if v == false then t[k] = nil else t[k] = v end end
+    return core.json.encode(t)
+  end
+  local r = core.parseMergeRequest(reqJson())
+  check("request: a well-formed request parses", r ~= nil and r.branch == "fix/demo" and r.phase == "requested")
+  eq("request: ...keeps the summary", r and r.summary, "Fix the demo")
+  for what, over in pairs({
+    ["garbage"] = "junk", ["an unknown phase"] = { phase = "exploded" }, ["no nonce"] = { nonce = false },
+    ["a relative worktree"] = { worktree = "demo" }, ["a branch that isn't a ref name"] = { branch = "fix demo; rm -rf" },
+    ["a base that isn't a ref name"] = { base = "../x" }, ["an unsafe key"] = { key = "../s1" }, ["no common dir"] = { commonDir = false },
+  }) do
+    local raw = (type(over) == "string") and over or reqJson(over)
+    check("request: refuses " .. what, core.parseMergeRequest(raw) == nil)
+  end
+  local long = core.parseMergeRequest(reqJson({ summary = string.rep("x", 5000), tests = string.rep("y", 900) }))
+  check("request: a runaway summary/test claim is capped", long and #long.summary <= 1000 and #long.tests <= 300)
+
+  local cmd = core.mergeFactsCmd(r)
+  check("facts: one git command per fact, paths quoted, refs passed as written",
+        cmd:find("--git-dir='/r/main/.git'", 1, true) and cmd:find("-C '/r/main/.claude/worktrees/demo'", 1, true)
+        and cmd:find("main..fix/demo", 1, true) and cmd:find("main...fix/demo", 1, true))
+  local out = table.concat({
+    "@@listed", "worktree /r/main", "HEAD aaa", "branch refs/heads/main", "",
+    "worktree /r/main/.claude/worktrees/demo", "HEAD bbb", "branch refs/heads/fix/demo", "",
+    "@@head", "fix/demo", "@@status", "@@ahead", "2", "@@behind", "3",
+    "@@commits", "abc1234\tAdd the thing", "def5678\tTest the thing",
+    "@@stat", " 2 files changed, 10 insertions(+), 1 deletion(-)",
+    "@@files", "M\tapp.lua", "A\ttests/app.test.lua", "" }, "\n")
+  local f = core.parseMergeFacts(out, r)
+  check("facts: the worktree is listed on its branch", f.listed == true)
+  eq("facts: its HEAD", f.head, "fix/demo")
+  check("facts: a clean tree", f.clean == true)
+  eq("facts: commits ahead", f.ahead, 2)
+  eq("facts: commits main has that it doesn't", f.behind, 3)
+  eq("facts: the commit list", #f.commits .. "|" .. f.commits[1].h .. "|" .. f.commits[1].s, "2|abc1234|Add the thing")
+  eq("facts: the changed files", #f.files .. "|" .. f.files[2].st .. "|" .. f.files[2].path, "2|A|tests/app.test.lua")
+  eq("facts: the shortstat", f.stat, "2 files changed, 10 insertions(+), 1 deletion(-)")
+
+  local item = { key = "s1", wtRoot = "/r/main/.claude/worktrees/demo" }
+  local ok = core.mergeReadiness(r, f, item)
+  check("ready: listed, on its branch, clean, ahead", ok.ready == true and #ok.problems == 0)
+  check("ready: no facts yet -> still checking, not ready", core.mergeReadiness(r, nil, item).checking == true)
+  local function problem(facts, it) local x = core.mergeReadiness(r, facts, it or item); return (not x.ready) and x.problems[1] or nil end
+  local function with(over) local t = {} for k, v in pairs(f) do t[k] = v end for k, v in pairs(over) do t[k] = v end return t end
+  check("not ready: uncommitted changes", (problem(with({ clean = false, dirty = { " M app.lua" } })) or ""):find("uncommitted", 1, true))
+  check("not ready: the worktree moved to another branch", (problem(with({ head = "fix/other" })) or ""):find("fix/other", 1, true))
+  check("not ready: the worktree is gone from the repo", (problem(with({ listed = false })) or ""):find("isn't one of", 1, true))
+  check("not ready: nothing ahead", (problem(with({ ahead = 0 })) or ""):find("nothing to merge", 1, true))
+  check("not ready: the session left that worktree", (problem(f, { key = "s1", wtRoot = "/r/main" }) or ""):find("left that worktree", 1, true))
+  check("ready: main having moved on is not a problem (the session rebases)", core.mergeReadiness(r, with({ behind = 9 }), item).ready)
+
+  -- the queue: one merge per repo at a time, in click order
+  local function req(key, repo, phase, extra)
+    local t = { key = key, nonce = "n-" .. key, commonDir = repo, phase = phase or "requested", at = 100 }
+    for k, v in pairs(extra or {}) do t[k] = v end
+    return t
+  end
+  local reqs = { a = req("a", "/r/.git"), b = req("b", "/r/.git"), c = req("c", "/other/.git") }
+  local q = core.mergeQueue(reqs, { b = { nonce = "n-b", at = 5 }, a = { nonce = "n-a", at = 9 }, c = { nonce = "n-c", at = 7 } }, {}, 200)
+  eq("queue: the first-approved of each repo starts, repos in parallel", table.concat(q.release, ","), "b,c")
+  eq("queue: the other waits its turn", q.queued.a, 1)
+  q = core.mergeQueue(reqs, { a = { nonce = "n-a", at = 9 } }, { b = { nonce = "n-b", at = 190 } }, 200)
+  check("queue: a decision already sent (not yet claimed) keeps its repo busy", #q.release == 0 and q.queued.a == 1)
+  reqs.b = req("b", "/r/.git", "approved", { approvedAt = 150 })
+  q = core.mergeQueue(reqs, { a = { nonce = "n-a", at = 9 } }, {}, 200)
+  check("queue: a merge in progress keeps its repo busy", #q.release == 0 and q.queued.a == 1)
+  reqs.b = req("b", "/r/.git", "merged")
+  q = core.mergeQueue(reqs, { a = { nonce = "n-a", at = 9 } }, {}, 200)
+  eq("queue: when it's merged, the next one starts", table.concat(q.release, ","), "a")
+  reqs.b = req("b", "/r/.git", "blocked")
+  eq("queue: ...or when it's blocked", table.concat(core.mergeQueue(reqs, { a = { nonce = "n-a", at = 9 } }, {}, 200).release, ","), "a")
+  reqs.b = nil
+  eq("queue: ...or when its request is gone (session closed)", table.concat(core.mergeQueue(reqs, { a = { nonce = "n-a", at = 9 } }, {}, 200).release, ","), "a")
+  reqs.b = req("b", "/r/.git", "approved", { approvedAt = 100 })
+  q = core.mergeQueue(reqs, { a = { nonce = "n-a", at = 9 } }, {}, 100 + core.MERGE_STALL + 1)
+  check("queue: a merge that went quiet for an hour stops blocking, and is reported",
+        table.concat(q.release, ",") == "a" and q.stalled[1] == "b")
+  q = core.mergeQueue({ a = req("a", "/r/.git") }, { a = { nonce = "old", at = 1 } }, { z = { nonce = "n-z", at = 1 } }, 200)
+  check("queue: an approval for a replaced request is dropped, never released", #q.release == 0 and #q.drop >= 1)
+
+  local v = core.mergeView(r, ok, f, {})
+  eq("card: ready", core.mergeLine(v), "⇡ ready to merge fix/demo → main")
+  eq("card: queued", core.mergeLine(core.mergeView(r, ok, f, { queued = 2 })), "⇡ queued to merge fix/demo (#2 in line)")
+  eq("card: next in line", core.mergeLine(core.mergeView(r, ok, f, { queued = 1 })), "⇡ queued to merge fix/demo (next in line)")
+  eq("card: approved, starting", core.mergeLine(core.mergeView(r, ok, f, { sent = true })), "⇡ merge approved: fix/demo is starting")
+  eq("card: a problem shows instead of 'ready'",
+     core.mergeLine(core.mergeView(r, core.mergeReadiness(r, with({ ahead = 0 }), item), f, {})), "⇡ merge request: nothing to merge: 0 commits ahead of main")
+  local ap = core.parseMergeRequest(reqJson({ phase = "approved" }))
+  eq("card: merging", core.mergeLine(core.mergeView(ap, nil, nil, {})), "⇡ merging fix/demo into main")
+  local bl = core.parseMergeRequest(reqJson({ phase = "blocked", note = "tests disagree" }))
+  eq("card: blocked, with the reason", core.mergeLine(core.mergeView(bl, nil, nil, {})), "⚠ merge blocked: tests disagree")
+  local mg = core.parseMergeRequest(reqJson({ phase = "merged", sha = "abc1234def" }))
+  eq("card: merged", core.mergeLine(core.mergeView(mg, nil, nil, {})), "✓ merged fix/demo into main")
+  check("view: the webview never gets the nonce, session id or pid",
+        v.nonce == nil and v.session_id == nil and v.pid == nil and v.folder == "demo")
+
+  local function tier(view) return core.instanceTier({ key = "s1", status = "done", since = 1, merge = view }, {}) end
+  eq("tier: a merge request waiting for Adam needs you", tier(v), 1)
+  eq("tier: ...a blocked merge too", tier(core.mergeView(bl, nil, nil, {})), 1)
+  check("tier: a queued or running merge doesn't", tier(core.mergeView(r, ok, f, { queued = 1 })) ~= 1 and tier(core.mergeView(ap, nil, nil, {})) ~= 1)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

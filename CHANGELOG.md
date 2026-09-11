@@ -4,6 +4,33 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-11 — Ready to merge
+
+### Added — a worktree tab asks for a merge; you review and approve it in Shepherd
+
+A finished unit used to mean someone rebasing, merging and cleaning up by hand. Now the tab runs
+`~/.claude/cc-merge.sh request` in the background (Claude Code wakes it when the script exits),
+which refuses from the main checkout, a detached HEAD, a dirty worktree or a branch with nothing
+to merge, and otherwise writes a request to `~/.claude/cc-merge/<key>.json`. Shepherd reads it
+with its own git (listed worktree, on the branch, clean, ahead of main), puts *ready to merge* on
+the card with a review in the detail panel — summary, test claim, commits, files, full diff — and
+answers through a decision file bound to the request's nonce (the approval gate's claim-by-`mv`
+pattern, so an answer meant for another request is never consumed). **Merge** releases one merge
+per repo at a time in click order; **Not yet** sends a note back. The session then rebases, tests,
+fast-forwards main and runs `cc-merge.sh done`, which removes the worktree and branch only once
+the branch is in main and never forces either. Fixtures: `tests/merge.test.sh` (the script),
+`tests/core.test.lua` (request parsing, readiness, the queue, the card line) and the behavioral
+`tests/merge-request.test.lua` (the real dashboard: one alert per request, nonce-bound decisions,
+the per-repo queue, no keystrokes).
+
+### Fixed — `make install` rewrote running hook scripts in place
+
+`make install` copied the hook scripts with `cp`, which rewrites a file in place — and bash reads
+a script lazily from its open fd, so a hook running at that moment (a gate waiter) resumed inside
+the new file's bytes. `install.sh` already swapped files in with a rename; `make install` now does
+too. Fixture: `tests/install.test.sh` holds the old file open across `make install` (red before:
+the reader saw the new bytes).
+
 ## 2026-09-11 — The tab bridge's switch is its own key
 
 ### Fixed — Close-by-tab was off for anyone with the SSH remote bridge off

@@ -40,7 +40,9 @@ assert_eq 'esc() encodes "'  "yes" "$(has '.replace(/"/g,"&quot;")')"
 # 2026-09-10 (project stacks): branch names, the stack name/key, chat titles and worktree
 # paths are user-controlled too, and the Instances view builds its rows from `im.` (an
 # instance) and `iw.` (an idle worktree) -- every one of those fields must be esc()'d.
-SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot)\b|\b(im|iw)\.[A-Za-z]+\b|\bg\b)"
+# 2026-09-11 (ready to merge): a merge request's branch, summary, test claim and note are
+# written by a session -- it.merge.* and an Instances row's `mg.` never reach HTML raw.
+SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge)\b|\b(im|iw|mg)\.[A-Za-z]+\b|\bg\b)"
 raw_sinks="$(grep -nE "$SINK_RE" "$DASH" || true)"
 assert_eq "no user field concatenated RAW into panel HTML (must be esc()'d)" "" "$raw_sinks"
 
@@ -64,6 +66,14 @@ assert_eq "deny-list grep fires on a planted raw sink (no vacuous pass)" "1" "$p
 tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "html += '<span>' + im.folder + '</span>';" >> "$tmp"
 planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
 assert_eq "deny-list grep fires on a planted raw Instances-row sink" "1" "$planted"
+tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "html += '<i>' + mg.line + '</i>';" >> "$tmp"
+planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
+assert_eq "deny-list grep fires on a planted raw merge-request sink" "1" "$planted"
+review="$(sed -n '/^    function renderMerge(it){/,/^    }$/p' "$DASH")"
+[ -n "$review" ] && got=found || got=missing
+assert_eq "the merge review renderer exists" "found" "$got"
+case "$review" in *innerHTML*) got=innerHTML ;; *) got=textContent ;; esac
+assert_eq "the merge review fills itself with textContent only (never innerHTML)" "textContent" "$got"
 assert_eq "the stack name reaches the card through esc()" "yes" "$(has 'esc(it.stackName)')"
 assert_eq "a branch reaches the card through esc()"       "yes" "$(has 'esc(it.branch)')"
 

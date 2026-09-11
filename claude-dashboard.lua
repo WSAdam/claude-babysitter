@@ -2550,6 +2550,14 @@ function FX.removeStatus(key)
   os.remove(POLICY_DIR .. "/" .. key)
   os.remove(POLICY_OVERRIDE_DIR .. "/" .. key)
   os.remove((os.getenv("CC_AUTOMODEL_DIR") or (home .. "/.claude/cc-automodel")) .. "/" .. key)
+  -- ready-to-merge request + Shepherd's answer (cc_remove drops the same files)
+  local mergeDir = os.getenv("CC_MERGE_DIR") or (home .. "/.claude/cc-merge")
+  os.remove(mergeDir .. "/" .. key .. ".json")
+  os.remove(mergeDir .. "/" .. key .. ".decision")
+  local mclaim = key .. ".decision.claim."
+  for _, fn in ipairs(FX.readDir(mergeDir)) do
+    if fn:sub(1, #mclaim) == mclaim then os.remove(mergeDir .. "/" .. fn) end
+  end
 end
 
 -- ---- Companion extension: close an exact Claude tab (2026-09-11) -----------------
@@ -2644,6 +2652,167 @@ function FX.tabBridgePollResults()
       FX._tabBridgePending[id] = nil
       print("[cc-dashboard] ⚠️ the Shepherd tab bridge (host " .. p.hw .. ") didn't answer -- close of '" .. p.name .. "' withdrawn")
       pcall(function() hs.alert.show("The Shepherd tab bridge didn't answer, so " .. p.name .. "'s tab is still open.") end)
+    end
+  end
+end
+
+-- ---- Ready to merge (2026-09-11) --------------------------------------------------
+-- cc-merge.sh (a worktree tab waiting in the background) writes <MERGE_DIR>/<key>.json.
+-- Shepherd reads it with its OWN git (core.mergeFactsCmd, cached per request), puts the
+-- card line and the review on the tile, and answers through <key>.decision, bound to the
+-- request's nonce read from disk. One merge per repo at a time, in click order
+-- (core.mergeQueue). No keystrokes anywhere. State on FX: the main chunk is at the local cap.
+FX.MERGE_DIR = os.getenv("CC_MERGE_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-merge")
+FX.MERGE_FACTS_TTL = 20
+FX._mergeApproved = {}   -- key -> { nonce, at }: Adam clicked Merge, waiting for its turn
+FX._mergeSent = {}       -- key -> { nonce, at }: decision written, the script hasn't claimed it yet
+FX._mergeFacts = {}      -- nonce -> { at, facts }
+FX._mergeAlerted = {}    -- "<nonce>|<phase>" -> true: each state alerts once
+FX._mergeReqs = {}       -- key -> request, live sessions only (last tick)
+FX._mergeItems = {}      -- key -> the session's tile (last tick)
+
+function FX.readMergeRequests()
+  local out = {}
+  for _, name in ipairs(FX.readDir(FX.MERGE_DIR)) do
+    local key = name:match("^(.+)%.json$")
+    if key then
+      local r = core.parseMergeRequest(FX.readFile(FX.MERGE_DIR .. "/" .. name))
+      if r and r.key == key then out[key] = r end
+    end
+  end
+  return out
+end
+
+function FX.mergeFacts(req, force)
+  local c = FX._mergeFacts[req.nonce]
+  if c and not force and FX.now() - c.at < FX.MERGE_FACTS_TTL then return c.facts end
+  local out
+  pcall(function() out = hs.execute(core.mergeFactsCmd(req)) end)
+  local facts = core.parseMergeFacts(out, req)
+  FX._mergeFacts[req.nonce] = { at = FX.now(), facts = facts }
+  return facts
+end
+
+-- The answer, bound to the nonce ON DISK (never a remembered one). true + the request on success.
+function FX.writeMergeDecision(key, verdict, note)
+  local r = core.parseMergeRequest(FX.readFile(FX.MERGE_DIR .. "/" .. key .. ".json"))
+  if not r or r.phase ~= "requested" then return false end
+  local body = core.json.encode({ nonce = r.nonce, verdict = verdict, note = note or "" })
+  return FX.writeFileAtomic(FX.MERGE_DIR .. "/" .. key .. ".decision", body), r
+end
+
+function FX.mergeAlert(msg)
+  print("[cc-dashboard] " .. msg)
+  pcall(function() hs.alert.show(msg, 4) end)
+end
+
+-- Its turn came: re-check with fresh git facts, then tell the waiting script to go.
+function FX.releaseMerge(key)
+  local r, it = FX._mergeReqs[key], FX._mergeItems[key]
+  if not r then FX._mergeApproved[key] = nil; return false end
+  local rd = core.mergeReadiness(r, FX.mergeFacts(r, true), it)
+  if not rd.ready then
+    FX._mergeApproved[key] = nil
+    FX.mergeAlert("⚠️ " .. r.branch .. " is no longer ready to merge (" .. tostring(rd.problems[1]) .. ") -- it's waiting for you again")
+    return false
+  end
+  local ok = FX.writeMergeDecision(key, "merge")
+  FX._mergeApproved[key] = nil
+  if ok then
+    FX._mergeSent[key] = { nonce = r.nonce, at = FX.now() }
+    FX.mergeAlert("⇡ Merging " .. r.branch .. " into " .. r.base .. " -- the session takes it from here")
+  else
+    FX.mergeAlert("❌ Couldn't answer the merge request for " .. r.branch)
+  end
+  return ok
+end
+
+-- Adam clicked Merge: only for a request Shepherd itself finds ready. It starts now, or
+-- queues behind the merge already running in that repo.
+function FX.mergeApprove(key)
+  local r = FX._mergeReqs[key]
+  if not r or r.phase ~= "requested" then FX.mergeAlert("⚠️ That merge request is gone"); return false end
+  local rd = core.mergeReadiness(r, FX.mergeFacts(r, true), FX._mergeItems[key])
+  if not rd.ready then
+    FX.mergeAlert("⚠️ Can't merge " .. r.branch .. " yet: " .. tostring(rd.problems[1] or "still checking"))
+    return false
+  end
+  FX._mergeApproved[key] = { nonce = r.nonce, at = FX.now() }
+  local q = core.mergeQueue(FX._mergeReqs, FX._mergeApproved, FX._mergeSent, FX.now())
+  for _, k in ipairs(q.release) do if k == key then return FX.releaseMerge(key) end end
+  FX.mergeAlert("⇡ " .. r.branch .. " is queued: another merge in this repo goes first")
+  return true
+end
+
+function FX.mergeHold(key, note)
+  FX._mergeApproved[key] = nil
+  local ok, r = FX.writeMergeDecision(key, "hold", core.capChars(tostring(note or ""), 500))
+  if ok then FX.mergeAlert("✋ Not yet: " .. r.branch .. " stays in its worktree") else FX.mergeAlert("⚠️ That merge request is gone") end
+  return ok
+end
+
+-- The full diff for the review (base...branch, capped), pushed to the open detail panel.
+function FX.mergeDiff(key)
+  local r = FX._mergeReqs[key]
+  if not r then return end
+  local text
+  pcall(function()
+    local q = "'" .. r.commonDir:gsub("'", "'\\''") .. "'"
+    text = hs.execute("git --git-dir=" .. q .. " diff --no-color --no-ext-diff " .. r.base .. "..." .. r.branch
+      .. " 2>/dev/null | head -c 200000")
+  end)
+  local js = hs.json.encode({ key = key, text = text or "" })
+  pcall(function() wv:evaluateJavaScript("window.ccMergeDiff(" .. js .. ")") end)
+end
+
+-- Tick: stamp it.merge on each live session with a request, run the queue, alert once per
+-- state that wants Adam. Requests whose session is gone are ignored (and never block a repo).
+function FX.annotateMerges(list, cfg, bannerOn)
+  for _, it in ipairs(list or {}) do it.merge = nil end
+  if core.config(cfg, "merge.enabled", true) == false then FX._mergeReqs, FX._mergeItems = {}, {}; return end
+  local byKey, byPid = {}, {}
+  for _, it in ipairs(list or {}) do
+    if it.key and not it.remote then
+      byKey[it.key] = it
+      if it.session_pid and tostring(it.session_pid) ~= "" then byPid[tostring(it.session_pid)] = it end
+    end
+  end
+  local reqs, items = {}, {}
+  for key, r in pairs(FX.readMergeRequests()) do
+    local it = byKey[key] or (r.pid ~= "" and byPid[r.pid]) or nil   -- a /clear keeps the process
+    if it then reqs[key], items[key] = r, it end
+  end
+  FX._mergeReqs, FX._mergeItems = reqs, items
+  local q = core.mergeQueue(reqs, FX._mergeApproved, FX._mergeSent, FX.now())
+  for _, d in ipairs(q.drop) do
+    if d.kind == "sent" then FX._mergeSent[d.key] = nil else FX._mergeApproved[d.key] = nil end
+  end
+  for _, key in ipairs(q.release) do FX.releaseMerge(key) end
+  for _, key in ipairs(q.stalled) do
+    local tag = reqs[key].nonce .. "|stalled"
+    if not FX._mergeAlerted[tag] then
+      FX._mergeAlerted[tag] = true
+      FX.mergeAlert("⚠️ The merge of " .. reqs[key].branch .. " hasn't reported back in an hour -- the next one in that repo may start")
+    end
+  end
+  if next(reqs) == nil then return end
+  q = core.mergeQueue(reqs, FX._mergeApproved, FX._mergeSent, FX.now())   -- after this tick's releases
+  for key, r in pairs(reqs) do
+    local it = items[key]
+    local facts, rd
+    if r.phase == "requested" then
+      facts = FX.mergeFacts(r)
+      rd = core.mergeReadiness(r, facts, it)
+    end
+    it.merge = core.mergeView(r, rd, facts, { queued = q.queued[key], sent = FX._mergeSent[key] ~= nil })
+    if it.merge.needsYou and not (r.phase == "requested" and rd and rd.checking) then
+      local tag = r.nonce .. "|" .. r.phase
+      if not FX._mergeAlerted[tag] then
+        FX._mergeAlerted[tag] = true
+        local name = tostring(it.label or it.name or "a session")
+        FX.mergeAlert(it.merge.line .. "  (" .. name .. ")")
+        if bannerOn then FX.notify("Shepherd · " .. name, it.merge.line, { key = it.key }) end
+      end
     end
   end
 end
@@ -5546,6 +5715,11 @@ local function handleBridgeMsg(msg)
     FX.newWorktreeTab(tostring(payload.v or ""), tostring(payload.text or ""))
     return
   end
+  -- Ready to merge (2026-09-11): v = session key. Merge runs through Shepherd's own
+  -- readiness check and the per-repo queue; Not yet sends the note back; no keystrokes.
+  if a == "merge-approve" then FX.mergeApprove(tostring(payload.v or "")); return end
+  if a == "merge-hold" then FX.mergeHold(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  if a == "merge-diff" then FX.mergeDiff(tostring(payload.v or "")); return end
   if a == "open-hidden-view" then
     -- The restore list. Sends only what the row needs to identify a session --
     -- never a prompt body (the panel's audit view owns content, this doesn't).
@@ -7145,6 +7319,17 @@ local HTML = [[
      red escalate ring still wins when a tile is somehow both. */
   .tile.hung { box-shadow:0 0 0 2px var(--purple), 0 0 10px var(--purple); }
   .tile.escalate { box-shadow:0 0 0 2px var(--danger), 0 0 12px var(--danger); }
+  /* a merge request waiting for you (or one that came back blocked) */
+  .tile.merge { box-shadow:0 0 0 2px #14b8a6, 0 0 10px #14b8a6; }
+  #d-merge { display:none; margin:6px 0; padding:8px 10px; border:1px solid #14b8a6; border-radius:8px; font-size:12px; }
+  #d-merge .dm-head { font-weight:600; }
+  #d-merge .dm-sub, #d-merge .dm-tests { opacity:.85; margin-top:3px; white-space:pre-wrap; }
+  #d-merge .dm-problems { color:var(--warn); margin-top:4px; }
+  #d-merge ul { margin:4px 0 0 16px; padding:0; max-height:120px; overflow:auto; }
+  #d-merge .dm-files li { font-family:ui-monospace,Menlo,monospace; font-size:11px; }
+  #d-merge pre { display:none; max-height:240px; overflow:auto; font-size:11px; margin:6px 0 0; white-space:pre; }
+  #d-merge .dm-acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; align-items:center; }
+  #d-merge .dm-acts input { flex:1; min-width:120px; }
   /* per-session risk badge (Feature E): only shown for med/high */
   .risk { font-size:10px; margin-left:5px; }
   .risk.r-med  { color:var(--warn); }
@@ -8270,6 +8455,23 @@ local HTML = [[
       <span id="d-status"></span>
     </div>
     <div id="d-shared"></div>
+    <!-- Ready to merge (2026-09-11): a fixed skeleton that renderMerge fills with
+         textContent only; the note input is never rebuilt, so a half-typed note survives. -->
+    <div id="d-merge">
+      <div class="dm-head" id="dm-head"></div>
+      <div class="dm-sub" id="dm-sub"></div>
+      <div class="dm-tests" id="dm-tests"></div>
+      <div class="dm-problems" id="dm-problems"></div>
+      <ul class="dm-commits" id="dm-commits"></ul>
+      <ul class="dm-files" id="dm-files"></ul>
+      <pre id="dm-diff"></pre>
+      <div class="dm-acts" id="dm-acts">
+        <button id="dm-merge" onclick="mergeAct('merge-approve')" title="Tell the session to rebase, run the tests, fast-forward main and remove its worktree">⇡ Merge</button>
+        <input id="dm-note" maxlength="500" placeholder="Note for the session (optional)">
+        <button id="dm-hold" onclick="mergeAct('merge-hold')" title="Send the note back; the unit stays in its worktree">Not yet</button>
+        <button id="dm-diffbtn" onclick="mergeDiff()">Full diff</button>
+      </div>
+    </div>
     <!-- L5 tab strip: groups the views Shepherd already renders. The bar is
          built in JS from __DETAIL_TABS__ (single source w/ core.DETAIL_TABS);
          only the active panel shows. Renderers keep writing into the same div
@@ -11969,6 +12171,74 @@ local HTML = [[
       }
     }
 
+    // ---- Ready to merge (2026-09-11): the review in the detail panel ----------------
+    // Everything in it.merge was written by a session, so it goes in through textContent
+    // only. The note input and the diff pane are never rebuilt by a re-render.
+    var MERGE_DIFF = { key: null, text: "" };
+    function mergeFactsLine(m){
+      var parts = [];
+      if(m.ahead > 0) parts.push(m.ahead + " commit" + (m.ahead === 1 ? "" : "s") + " ahead of " + (m.base || "main"));
+      if(m.behind > 0) parts.push((m.base || "main") + " has " + m.behind + " newer commit" + (m.behind === 1 ? "" : "s") + " (the session rebases first)");
+      if(m.stat) parts.push(m.stat);
+      return parts.join(" · ");
+    }
+    function mergeFillList(el, rows, fmt){
+      var sig = JSON.stringify(rows);
+      if(el.getAttribute("data-sig") === sig) return;
+      el.setAttribute("data-sig", sig);
+      while(el.firstChild) el.removeChild(el.firstChild);
+      for(var i=0;i<rows.length;i++){
+        var li = document.createElement("li");
+        li.textContent = fmt(rows[i]);
+        el.appendChild(li);
+      }
+      el.style.display = rows.length ? "" : "none";
+    }
+    function renderMerge(it){
+      var box = document.getElementById("d-merge");
+      if(!box) return;
+      var m = it && it.merge;
+      if(!m || !m.phase){ box.style.display = "none"; return; }
+      box.style.display = "block";
+      var asking = m.phase === "requested" && !m.sent;
+      document.getElementById("dm-head").textContent = m.line || "";
+      var facts = mergeFactsLine(m);
+      document.getElementById("dm-sub").textContent = (m.summary ? m.summary : "") + (facts ? (m.summary ? "\n" : "") + facts : "");
+      document.getElementById("dm-tests").textContent = m.tests ? "Tests, as the session reports them: " + m.tests : "";
+      var probs = Array.isArray(m.problems) ? m.problems : [];
+      document.getElementById("dm-problems").textContent = (asking && probs.length) ? "Not ready: " + probs.join("; ") : "";
+      var commits = Array.isArray(m.commits) ? m.commits : [];
+      var files = Array.isArray(m.files) ? m.files : [];
+      mergeFillList(document.getElementById("dm-commits"), asking ? commits : [], function(c){ return (c.h || "") + "  " + (c.s || ""); });
+      mergeFillList(document.getElementById("dm-files"), asking ? files : [], function(f){ return (f.st || "") + "  " + (f.path || ""); });
+      document.getElementById("dm-acts").style.display = asking ? "flex" : "none";
+      var bm = document.getElementById("dm-merge");
+      bm.disabled = !(m.ready && !m.queued);
+      bm.title = m.queued ? "Already queued behind another merge in this repo"
+        : (m.ready ? "Tell the session to rebase, run the tests, fast-forward " + (m.base || "main") + " and remove its worktree"
+                   : "Not ready: " + (probs[0] || "still checking"));
+      var pre = document.getElementById("dm-diff");
+      var showDiff = asking && MERGE_DIFF.key === it.key && MERGE_DIFF.text !== null;
+      if(showDiff){
+        if(pre.getAttribute("data-k") !== it.key){ pre.textContent = MERGE_DIFF.text || "(no diff)"; pre.setAttribute("data-k", it.key); }
+        pre.style.display = "block";
+      } else { pre.style.display = "none"; }
+    }
+    function mergeAct(a){
+      if(!selectedKey) return;
+      var note = document.getElementById("dm-note");
+      send(a, selectedKey, a === "merge-hold" ? (note.value || "") : "");
+      if(a === "merge-hold") note.value = "";
+    }
+    function mergeDiff(){ if(selectedKey) send("merge-diff", selectedKey); }
+    window.ccMergeDiff = function(p){
+      if(!p || typeof p.key !== "string") return;
+      MERGE_DIFF = { key: p.key, text: typeof p.text === "string" ? p.text : "" };
+      var pre = document.getElementById("dm-diff");
+      if(pre){ pre.removeAttribute("data-k"); }
+      if(p.key === selectedKey){ var it = findItem(selectedKey); if(it) renderMerge(it); }
+    };
+
     function renderDetail(){
       var d = document.getElementById("detail");
       var it = selectedKey ? findItem(selectedKey) : null;
@@ -12064,6 +12334,7 @@ local HTML = [[
           + (others === 1 ? "" : "s") + " — Shepherd won't type into it. Jump there and act in the tab." : "";
         dsh.style.display = shared ? "block" : "none";
       }
+      renderMerge(it);
       var bdeny = document.getElementById("b-deny");
       lockCtl(bdeny, (remote && !remoteWait) ? REMOTE_T : ((shared && !gateWait) ? SHARED_T : ""));
       // Errored session: the Approve button becomes Continue (types "continue" + Enter to
@@ -12266,8 +12537,10 @@ local HTML = [[
       for(var i=0;i<members.length;i++){
         var im = members[i];
         var st = /^[a-z]+$/.test(im.status || "") ? im.status : "idle";
-        var needs = st === "approval" || st === "error" || !!im.hung;
-        var sub = im.pendingSummary ? "wants: " + im.pendingSummary : (im.sessTitle || "");
+        var mg = im.merge || null;   // ready to merge (core.mergeView, trimmed by instancesPayload)
+        var needs = st === "approval" || st === "error" || !!im.hung || !!(mg && mg.needsYou);
+        var sub = im.pendingSummary ? "wants: " + im.pendingSummary : ((mg && mg.line) || im.sessTitle || "");
+        var canMerge = !!(mg && mg.phase === "requested" && mg.ready && !mg.queued && !mg.sent);
         html += '<div class="in-row' + (needs ? ' needs' : '') + (im.hidden ? ' hid' : '') + '">'
              +   '<span class="in-dot in-st-' + st + '"></span>'
              +   '<div class="in-main">'
@@ -12283,8 +12556,9 @@ local HTML = [[
              +   '<div class="in-acts">'
              +     (im.hidden
                      ? '<button class="in-btn" data-inact="unhide" data-k="' + esc(im.key) + '">Unhide</button>'
-                     : '<button class="in-btn" data-inact="focus" data-k="' + esc(im.key) + '">Focus</button>'
-                       + '<button class="in-btn" data-inact="details" data-k="' + esc(im.key) + '">Details</button>')
+                     : (canMerge ? '<button class="in-btn" data-inact="merge" data-k="' + esc(im.key) + '" title="Merge it (the review is in Details)">⇡ Merge</button>' : '')
+                       + '<button class="in-btn" data-inact="focus" data-k="' + esc(im.key) + '">Focus</button>'
+                       + '<button class="in-btn" data-inact="details" data-k="' + esc(im.key) + '">' + (mg ? 'Review' : 'Details') + '</button>')
              +   '</div>'
              + '</div>';
       }
@@ -12336,6 +12610,7 @@ local HTML = [[
         if(act === "focus"){ send("focus", k); closeInstances(); }
         else if(act === "details"){ closeInstances(); selectTile(k); }
         else if(act === "unhide"){ send("unhide-tile", k); }
+        else if(act === "merge"){ send("merge-approve", k); }
         else if(act === "open"){ INST.opening[k] = Date.now(); send("open-worktree", INST.stackKey, k); renderInstances(true); }
       });
       document.addEventListener("keydown", function(e){
@@ -14226,6 +14501,8 @@ local HTML = [[
       } else if(st === "error"){
         meta = (it.error_reason && it.error_reason !== "unknown" ? "[" + it.error_reason.replace(/_/g," ") + "] " : "")
              + (it.error_message || "API error — stopped");
+      } else if(it.merge && it.merge.line){
+        meta = it.merge.line;   // ready to merge / queued / merging / blocked (core.mergeLine)
       }
       if(it.remote){ meta = (meta ? meta + " · " : "") + "⇄ " + (it.remote.host || "remote")
                             + (it.bridgeStale ? " (bridge offline)" : ""); }
@@ -14238,7 +14515,7 @@ local HTML = [[
       if(it.hung){ meta = (meta ? meta + " · " : "") + "⏳ stalled"; }
       if(it.looping){ meta = (meta ? meta + " · " : "") + "⟳ looping"; }   // L5 loop watchdog
       if(it.churn){ meta = (meta ? meta + " · " : "") + "♻️" + it.churn; }   // respawn/clear churn today
-      var cls = "tile s-" + stCls + (it.stale && !bgRunning(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
+      var cls = "tile s-" + stCls + (it.stale && !bgRunning(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (it.merge && it.merge.needsYou ? " merge" : "") + (it.key === selectedKey ? " sel" : "");
       // select + double-click jump are decided at mousedown by onGridMouseDown (below):
       // a grid rebuild mid-press detaches the tile, so inline click handlers were lost
       // data-stack: this card's project stack (focus-group + the Instances button read it)
@@ -15911,6 +16188,9 @@ function FX._refreshBody()
   -- session that entered a sibling worktree finds its launch folder through its origin.
   FX.annotateOrigins(list)   -- the window each session lives in (see FX.annotateOrigins)
   FX.annotateStacks(list, labels, cfg)
+  -- Ready to merge (2026-09-11): after the stacks (readiness compares the session's current
+  -- worktree) and before the stack ranking (a request waiting for Adam leads its card).
+  FX.annotateMerges(list, cfg, bannerOn)
   -- Two sessions in ONE project used to render as IDENTICAL cards: the name (and
   -- any relabel) is per-projectKey, so nothing on either tile said which chat it
   -- was. Give each of those tiles its own chat title -- and only those, so a

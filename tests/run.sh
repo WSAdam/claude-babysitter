@@ -27,6 +27,9 @@ echo ""
 echo "== bash: approval gate =="
 bash "$DIR/gate.test.sh" || fail=1
 echo ""
+echo "== bash: ready-to-merge requests (cc-merge.sh) =="
+bash "$DIR/merge.test.sh" || fail=1
+echo ""
 echo "== bash: audit ledger =="
 bash "$DIR/ledger.test.sh" || fail=1
 echo ""
@@ -91,6 +94,9 @@ HOME="$(mktemp -d)" lua "$DIR/tab-worktree.test.lua" || fail=1
 echo ""
 echo "== lua: no keystrokes into a window shared by several sessions (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/shared-window.test.lua" || fail=1
+echo ""
+echo "== lua: ready to merge -- review, one merge per repo, Not yet (behavioral, stubbed hs + git) =="
+HOME="$(mktemp -d)" lua "$DIR/merge-request.test.lua" || fail=1
 echo ""
 echo "== lua: New worktree tab opens a prefilled Claude tab, never a keystroke (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/new-worktree-tab.test.lua" || fail=1

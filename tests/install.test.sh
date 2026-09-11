@@ -374,4 +374,23 @@ assert_eq "gate: missing lua prints 'cannot verify'" "1" \
 assert_eq "gate: missing lua writes no settings.json" "0" \
   "$([ -e "$GCDIR5/settings.json" ] && echo 1 || echo 0)"
 
+# ---- make install swaps scripts in with a rename (2026-09-11) ----
+# `make install` used plain `cp`, which rewrites a script IN PLACE: bash reads a script lazily
+# from its open fd, so a hook running at that moment (a gate waiter, a waiting merge request)
+# resumed at its byte offset inside the NEW file. A rename leaves the running copy intact.
+MCDIR="$TMP/make-claude"; MHDIR="$TMP/make-hs"; mkdir -p "$MCDIR" "$MHDIR"
+printf 'old\n' > "$MCDIR/cc-approve.sh"; printf 'old\n' > "$MCDIR/cc-merge.sh"
+exec 7< "$MCDIR/cc-approve.sh"       # a "running hook" holding the old file open
+make -C "$ROOT" --no-print-directory install HS_DIR="$MHDIR" CLAUDE_DIR="$MCDIR" NO_TAB_BRIDGE=1 >/dev/null 2>&1
+assert_eq "make install: exit 0" "0" "$?"
+assert_eq "make install: a script already running keeps reading its own copy" "old" "$(cat <&7)"
+exec 7<&-
+cmp -s "$ROOT/cc-approve.sh" "$MCDIR/cc-approve.sh" && got=new || got=stale
+assert_eq "make install: ...while the new copy is in place" "new" "$got"
+cmp -s "$ROOT/cc-merge.sh" "$MCDIR/cc-merge.sh" && [ -x "$MCDIR/cc-merge.sh" ] && got=yes || got=no
+assert_eq "make install: ships cc-merge.sh, executable" "yes" "$got"
+ls -a "$MCDIR" | grep -q '\.tmp\.' && got=leftovers || got=clean
+assert_eq "make install: leaves no temp files behind" "clean" "$got"
+exists "install.sh: ships cc-merge.sh too" "$CDIR/cc-merge.sh"
+
 finish

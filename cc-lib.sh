@@ -314,6 +314,9 @@ CC_POLICY_OVERRIDE_DIR="${CC_POLICY_OVERRIDE_DIR:-${HOME}/.claude/cc-policy-over
 # reaps it on SessionEnd like the siblings above (default MUST match the dashboard's
 # AUTOMODEL_DIR). A new session gets a new key, so a stale opt-in can't silently carry over.
 CC_AUTOMODEL_DIR="${CC_AUTOMODEL_DIR:-${HOME}/.claude/cc-automodel}"
+# Ready-to-merge requests (cc-merge.sh) and Shepherd's answers to them, per session key.
+# Default MUST match cc-merge.sh's and the dashboard's FX.MERGE_DIR.
+CC_MERGE_DIR="${CC_MERGE_DIR:-${HOME}/.claude/cc-merge}"
 
 # Remove a session entirely (used by SessionEnd) plus any stray decision/claim
 # file and the per-session gated-tools override, approveRepeats memo, autopilot
@@ -322,7 +325,8 @@ CC_AUTOMODEL_DIR="${CC_AUTOMODEL_DIR:-${HOME}/.claude/cc-automodel}"
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_decision_file "$1")" "$(cc_decision_file "$1")".claim.* \
     "$CC_GATE_TOOLS_DIR/$1" "$CC_APPROVED_DIR/$1" "$CC_AUTOPILOT_DIR/$1" \
-    "$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1" "$CC_AUTOMODEL_DIR/$1" 2>/dev/null || true
+    "$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1" "$CC_AUTOMODEL_DIR/$1" \
+    "$CC_MERGE_DIR/$1.json" "$CC_MERGE_DIR/$1.decision" "$CC_MERGE_DIR/$1.decision".claim.* 2>/dev/null || true
 }
 
 # ---- Audit/event ledger ----------------------------------------------------

@@ -933,6 +933,9 @@ end
 -- 3 hung · 4 finished and not jumped-to since it finished · 5 anything else.
 function M.instanceTier(it, seenAt)
   local st = it and it.status
+  -- 2026-09-11: a merge request waiting for Adam (or one that came back blocked) needs him
+  -- as much as an approval does.
+  if it and type(it.merge) == "table" and it.merge.needsYou then return 1 end
   if st == "approval" then return 1 end
   if st == "error" then return 2 end
   if it and it.hung then return 3 end
@@ -1112,6 +1115,9 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
       wtRoot = it.wtRoot, branch = it.branch, detached = it.detached, isMainWt = it.isMainWt,
       editor = it.editor, pendingSummary = (it.status == "approval") and ps or nil,
       bgActive = it.bg_active and true or nil,
+      -- ready to merge: just what the row shows (the review lives in the detail panel)
+      merge = (type(it.merge) == "table") and { phase = it.merge.phase, line = it.merge.line,
+        needsYou = it.merge.needsYou, ready = it.merge.ready, queued = it.merge.queued, sent = it.merge.sent } or nil,
     }
   end
   for _, it in ipairs(members or {}) do row(it, false) end
@@ -1246,6 +1252,219 @@ function M.isClaudeWorktree(mainRoot, path)
   local base = M.normDir(mainRoot) .. "/.claude/worktrees/"
   local p = M.normDir(path)
   return p:sub(1, #base) == base and #p > #base
+end
+
+-- ---- Ready to merge (2026-09-11) --------------------------------------------------
+-- A worktree tab finishing a unit runs cc-merge.sh, which writes ~/.claude/cc-merge/<key>.json
+-- and waits (in the background -- Claude Code wakes the session when it exits) for a
+-- decision file bound to the request's nonce. Shepherd checks the request with its OWN git,
+-- shows a review, and on Merge releases one merge per repo at a time, in click order. The
+-- session does the merge itself (rebase, tests, ff-merge) and reports back with `done`.
+M.MERGE_PHASES = { requested = true, approved = true, merged = true, ["merged-dirty"] = true, blocked = true }
+M.MERGE_STALL = 3600   -- an approved merge that hasn't reported back in an hour stops blocking its repo
+
+-- A git ref name we can pass unquoted: no spaces, quotes, "..", leading "-" or ".".
+local function mergeRefOk(s)
+  return type(s) == "string" and s ~= "" and #s <= 200 and s:match("^[%w_][%w._/-]*$") ~= nil
+     and not s:find("..", 1, true) and not s:find("//", 1, true) and not s:match("[/.]$")
+end
+
+local function capChars(s, n)
+  if type(s) ~= "string" then return "" end
+  local len = utf8.len(s)
+  if len == nil then return s:sub(1, n) end
+  if len <= n then return s end
+  return s:sub(1, utf8.offset(s, n + 1) - 1)
+end
+M.capChars = capChars   -- a note typed in the panel is capped the same way
+
+-- One request file -> a normalized table, or nil when anything is off. Everything in it was
+-- written by a session, so it's data: refs must be plain ref names, paths absolute, text capped.
+function M.parseMergeRequest(raw)
+  if type(raw) ~= "string" then return nil end
+  local ok, t = pcall(function() return M.json.decode(raw) end)
+  if not ok or type(t) ~= "table" then return nil end
+  if tonumber(t.v) ~= 1 or not M.MERGE_PHASES[t.phase] then return nil end
+  if type(t.key) ~= "string" or not t.key:match("^[%w._-]+$") then return nil end
+  if type(t.nonce) ~= "string" or not t.nonce:match("^[%w._-]+$") then return nil end
+  if type(t.session_id) ~= "string" or t.session_id == "" then return nil end
+  if type(t.worktree) ~= "string" or t.worktree:sub(1, 1) ~= "/" then return nil end
+  if type(t.commonDir) ~= "string" or t.commonDir:sub(1, 1) ~= "/" then return nil end
+  if not mergeRefOk(t.branch) or not mergeRefOk(t.base) then return nil end
+  return {
+    key = t.key, session_id = t.session_id, pid = tostring(t.pid or ""), nonce = t.nonce,
+    worktree = M.normDir(t.worktree), commonDir = M.normDir(t.commonDir), branch = t.branch, base = t.base,
+    summary = capChars(t.summary, 1000), tests = capChars(t.tests, 300), note = capChars(t.note, 500),
+    sha = (type(t.sha) == "string" and t.sha:match("^%x+$")) and t.sha or nil,
+    ahead = tonumber(t.ahead), at = tonumber(t.at) or 0, approvedAt = tonumber(t.approvedAt),
+    doneAt = tonumber(t.doneAt), phase = t.phase,
+  }
+end
+
+-- The one shell line that gathers everything the review and the readiness check need, in
+-- @@sections. Paths are quoted; refs were validated by parseMergeRequest.
+function M.mergeFactsCmd(req)
+  local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+  local G = "git --git-dir=" .. sq(req.commonDir)
+  local W = "git -C " .. sq(req.worktree)
+  local range, dots = req.base .. ".." .. req.branch, req.base .. "..." .. req.branch
+  return table.concat({
+    "echo @@listed", G .. " worktree list --porcelain 2>/dev/null",
+    "echo @@head", W .. " symbolic-ref --quiet --short HEAD 2>/dev/null",
+    "echo @@status", W .. " status --porcelain 2>/dev/null | head -n 20",
+    "echo @@ahead", G .. " rev-list --count " .. range .. " 2>/dev/null",
+    "echo @@behind", G .. " rev-list --count " .. req.branch .. ".." .. req.base .. " 2>/dev/null",
+    "echo @@commits", G .. " log --format='%h%x09%s' -n 50 " .. range .. " 2>/dev/null",
+    "echo @@stat", G .. " diff --shortstat " .. dots .. " 2>/dev/null",
+    "echo @@files", G .. " diff --name-status " .. dots .. " 2>/dev/null | head -n 200",
+  }, "; ")
+end
+
+function M.parseMergeFacts(out, req)
+  if type(out) ~= "string" or type(req) ~= "table" then return nil end
+  local sec, cur = {}, nil
+  for line in (out .. "\n"):gmatch("([^\n]*)\n") do
+    local name = line:match("^@@(%a+)$")
+    if name then cur = name; sec[cur] = sec[cur] or {}
+    elseif cur then table.insert(sec[cur], line) end
+  end
+  local function first(name) return ((sec[name] or {})[1] or ""):match("^%s*(.-)%s*$") end
+  local f = { commits = {}, files = {}, dirty = {}, listed = false }
+  for _, e in ipairs(M.parseWorktreePorcelain(table.concat(sec.listed or {}, "\n"))) do
+    if M.normDir(e.path) == req.worktree and e.branch == req.branch then f.listed = true end
+  end
+  f.head = first("head"); if f.head == "" then f.head = nil end
+  for _, l in ipairs(sec.status or {}) do if l:match("%S") then f.dirty[#f.dirty + 1] = l end end
+  f.clean = (#f.dirty == 0)
+  f.ahead = tonumber(first("ahead"):match("%d+") or "") or 0
+  f.behind = tonumber(first("behind"):match("%d+") or "") or 0
+  for _, l in ipairs(sec.commits or {}) do
+    local h, s = l:match("^(%x+)\t(.*)$")
+    if h then f.commits[#f.commits + 1] = { h = h, s = s } end
+  end
+  f.stat = first("stat")
+  for _, l in ipairs(sec.files or {}) do
+    local st, p = l:match("^(%u%d*)\t(.+)$")
+    if st then f.files[#f.files + 1] = { st = st:sub(1, 1), path = (p:gsub("\t", " → ")) } end
+  end
+  return f
+end
+
+-- Is the request mergeable right now, by Shepherd's own reading of git? `item` is the
+-- session's tile (its current worktree). Main having moved on is fine: the session rebases.
+function M.mergeReadiness(req, facts, item)
+  local out = { ready = false, checking = false, problems = {} }
+  if type(facts) ~= "table" then out.checking = true; return out end
+  local p = out.problems
+  if not facts.listed then p[#p + 1] = "the worktree isn't one of this repo's worktrees any more" end
+  if facts.head ~= req.branch then
+    p[#p + 1] = "the worktree is on " .. (facts.head or "a detached HEAD") .. ", not " .. req.branch
+  end
+  if not facts.clean then p[#p + 1] = "uncommitted changes in the worktree (" .. #(facts.dirty or {}) .. " file(s))" end
+  if (tonumber(facts.ahead) or 0) <= 0 then p[#p + 1] = "nothing to merge: 0 commits ahead of " .. req.base end
+  if type(item) == "table" and type(item.wtRoot) == "string" and M.normDir(item.wtRoot) ~= req.worktree then
+    p[#p + 1] = "the session has left that worktree"
+  end
+  out.ready = (#p == 0)
+  return out
+end
+
+-- Which approved requests may start now. `reqs` = key -> request (live sessions only),
+-- `approved` = key -> { nonce, at } (Adam clicked Merge), `sent` = key -> { nonce, at }
+-- (decision written, not yet claimed by the script). A repo is busy while a decision
+-- waits to be claimed or a merge runs; one merge per repo, the earliest click first.
+function M.mergeQueue(reqs, approved, sent, now)
+  local out = { release = {}, queued = {}, drop = {}, stalled = {} }
+  reqs, now = reqs or {}, tonumber(now) or 0
+  local busy = {}
+  for key, s in pairs(sent or {}) do
+    local r = reqs[key]
+    if r and r.nonce == s.nonce and r.phase == "requested" and now - (tonumber(s.at) or 0) <= 120 then
+      busy[r.commonDir] = true
+    else
+      out.drop[#out.drop + 1] = { kind = "sent", key = key }   -- claimed, gone, or never claimed
+    end
+  end
+  for key, r in pairs(reqs) do
+    if r.phase == "approved" then
+      if now - (tonumber(r.approvedAt) or tonumber(r.at) or 0) > M.MERGE_STALL then
+        out.stalled[#out.stalled + 1] = key
+      else
+        busy[r.commonDir] = true
+      end
+    end
+  end
+  local byRepo = {}
+  for key, a in pairs(approved or {}) do
+    local r = reqs[key]
+    if not r or r.nonce ~= a.nonce or r.phase ~= "requested" or (sent and sent[key]) then
+      out.drop[#out.drop + 1] = { kind = "approved", key = key }
+    else
+      byRepo[r.commonDir] = byRepo[r.commonDir] or {}
+      table.insert(byRepo[r.commonDir], { key = key, at = tonumber(a.at) or 0 })
+    end
+  end
+  for repo, list in pairs(byRepo) do
+    table.sort(list, function(x, y) if x.at ~= y.at then return x.at < y.at end return x.key < y.key end)
+    local start = 1
+    if not busy[repo] then out.release[#out.release + 1] = list[1].key; start = 2 end
+    for i = start, #list do out.queued[list[i].key] = i - start + 1 end
+  end
+  table.sort(out.release)
+  table.sort(out.stalled)
+  table.sort(out.drop, function(x, y) return x.key < y.key end)
+  return out
+end
+
+-- Does this merge state want Adam? A request he hasn't answered, or one that came back blocked
+-- or merged with leftovers.
+function M.mergeNeedsYou(v)
+  if type(v) ~= "table" then return false end
+  if v.phase == "requested" then return not v.queued and not v.sent end
+  return v.phase == "blocked" or v.phase == "merged-dirty"
+end
+
+-- The card's one line for a merge state.
+function M.mergeLine(v)
+  if type(v) ~= "table" then return nil end
+  local b, base = tostring(v.branch or "?"), tostring(v.base or "main")
+  if v.phase == "requested" then
+    if v.sent then return "⇡ merge approved: " .. b .. " is starting" end
+    if v.queued then
+      return "⇡ queued to merge " .. b .. " (" .. ((v.queued == 1) and "next" or ("#" .. v.queued)) .. " in line)"
+    end
+    if v.checking then return "⇡ merge request: checking " .. b end
+    if not v.ready then return "⇡ merge request: " .. tostring((v.problems or {})[1] or "not ready yet") end
+    return "⇡ ready to merge " .. b .. " → " .. base
+  elseif v.phase == "approved" then return "⇡ merging " .. b .. " into " .. base
+  elseif v.phase == "merged" then return "✓ merged " .. b .. " into " .. base
+  elseif v.phase == "merged-dirty" then return "✓ merged " .. b .. ", but " .. tostring(v.note or "something was left behind")
+  elseif v.phase == "blocked" then
+    return "⚠ merge blocked: " .. ((v.note and v.note ~= "") and v.note or "no reason given")
+  end
+  return nil
+end
+
+-- What the card and the review get: no nonce, session id or pid (those only travel between
+-- the script and Shepherd's decision writer). `q` = { queued = n, sent = bool }.
+function M.mergeView(req, rd, facts, q)
+  q = q or {}
+  local v = {
+    phase = req.phase, branch = req.branch, base = req.base, folder = req.worktree:match("([^/]+)/?$"),
+    summary = req.summary, tests = req.tests, note = req.note, at = req.at,
+    sha = req.sha and req.sha:sub(1, 7) or nil, queued = q.queued, sent = q.sent and true or nil,
+  }
+  if req.phase == "requested" then
+    v.ready = rd and rd.ready or false
+    v.checking = (rd == nil) or (rd.checking == true)
+    v.problems = rd and rd.problems or {}
+  end
+  if type(facts) == "table" then
+    v.ahead, v.behind, v.stat, v.commits, v.files = facts.ahead, facts.behind, facts.stat, facts.commits, facts.files
+  end
+  v.line = M.mergeLine(v)
+  v.needsYou = M.mergeNeedsYou(v)
+  return v
 end
 
 -- ---- Lockscreen board (what the lock overlay draws) -------------------------

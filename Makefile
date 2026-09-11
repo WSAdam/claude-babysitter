@@ -33,10 +33,15 @@ install:
 # The hooks run from $(CLAUDE_DIR), so a deploy that ships only the Lua leaves edits
 # to the status writer SILENTLY unshipped -- the panel reloads, the hooks do not.
 # Mirrors install.sh's file set (same scripts, same chmod).
-	@cp cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-core.lua "$(CLAUDE_DIR)/"
+# Each script is swapped in with a RENAME, never rewritten in place: bash reads a script
+# lazily from its open fd, so a hook running right now (a gate waiter, a merge request
+# waiting for Adam) would resume inside the new file's bytes. Same rule as install.sh.
+	@for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-core.lua; do \
+		cp "$$f" "$(CLAUDE_DIR)/.$$f.tmp.$$$$" && mv -f "$(CLAUDE_DIR)/.$$f.tmp.$$$$" "$(CLAUDE_DIR)/$$f" || exit 1; \
+	done
 	@chmod +x "$(CLAUDE_DIR)"/cc-*.sh
 	@echo "✅ copied hook scripts + core -> $(CLAUDE_DIR)/"
-	@$(MAKE) --no-print-directory tab-bridge
+	@[ -n "$(NO_TAB_BRIDGE)" ] || $(MAKE) --no-print-directory tab-bridge
 
 # The Shepherd companion VS Code extension (vscode-bridge/): packaged with plain zip and
 # installed with VS Code's own CLI -- no Marketplace, no npm. install-vsix.sh skips when
