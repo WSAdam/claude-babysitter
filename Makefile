@@ -59,6 +59,12 @@ tab-bridge:
 setup:
 	@bash install.sh
 
+# The worktree demo (demo/GUIDE.md): a fresh little Deno app, opened in a new VS Code window,
+# where "run the worktree demo" drives two units in parallel to main. Same as `deno task demo`.
+.PHONY: demo
+demo:
+	@deno task demo
+
 # Tooling check: report jq (required) + the rg/fd accelerators (optional — fleet search
 # and folder scan degrade to grep/find without them) and offer to brew-install any that are
 # missing. Read-only; re-runnable any time. Same check `make setup` runs at the end.

@@ -122,6 +122,13 @@ echo ""
 echo "== node: ⌘V lands in the focused field, not the nudge box (behavioral, runs the shipped paste helpers) =="
 node "$DIR/paste-target.test.js" || fail=1
 echo ""
+echo "== deno: the worktree demo's setup and check (demo/) =="
+if command -v deno >/dev/null 2>&1; then
+  (cd "$DIR/.." && deno test -A --quiet demo/) || fail=1
+else
+  echo "skipped: deno isn't installed (the demo needs it; https://deno.com)"
+fi
+echo ""
 echo "== lua: New worktree tab opens a prefilled Claude tab, never a keystroke (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/new-worktree-tab.test.lua" || fail=1
 echo ""

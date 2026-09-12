@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(deno task test)",
+      "Bash(deno task check)",
+      "Bash(deno test:*)",
+      "Bash(git:*)",
+      "Bash(~/.claude/cc-merge.sh:*)",
+      "Bash(__HOME__/.claude/cc-merge.sh:*)",
+      "Bash(~/.claude/cc-fleet.sh:*)",
+      "Bash(__HOME__/.claude/cc-fleet.sh:*)",
+      "Edit",
+      "Write"
+    ]
+  }
+}

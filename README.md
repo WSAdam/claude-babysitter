@@ -254,6 +254,15 @@ Ask a Claude session to run several units in parallel and it can drive the whole
 Your approval lives in Shepherd (`~/.claude/cc-fleet/<id>.state.json`), never in the proposal's own
 file. `"fleet": { "enabled": false }` makes Shepherd ignore proposals.
 
+### Try it: the worktree demo
+
+`deno task demo` (or `make demo`) sets up a fresh little Deno app and opens it in a new VS Code
+window; say **run the worktree demo** in a Claude tab there and watch two units work on the same
+file at once, land on main one after the other (the second through a merge conflict settled by the
+tests), and close their own tabs — with one approval and two Merge clicks from you. See
+[demo/GUIDE.md](demo/GUIDE.md) for the walkthrough and [demo/HOW-IT-WORKS.md](demo/HOW-IT-WORKS.md)
+for the mechanics.
+
 ### Answer questions from Shepherd
 
 When a session needs your decision it asks with Claude Code's question tool (AskUserQuestion).

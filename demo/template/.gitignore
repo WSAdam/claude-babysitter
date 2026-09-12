@@ -1,0 +1,4 @@
+# Worktrees Claude Code creates for each unit live here; never part of the repo.
+.claude/worktrees/
+# The driver's own run notes (start time, batch file).
+.demo-*

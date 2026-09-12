@@ -4,6 +4,20 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-12 — The worktree demo
+
+### Added — a repeatable, end-to-end demo of the parallel worktree flow
+
+`deno task demo` (or `make demo`) checks the prerequisites (Shepherd running, `cc-fleet.sh` /
+`cc-merge.sh` / `cc-ask.sh`, tab bridge ≥ 0.4.0, VS Code's CLI), moves old runs whose window is closed
+to the Trash, creates a **fresh** little Deno app per run (a new path, so VS Code restores no old
+tabs), commits it with its tests green, and opens it in a new VS Code window. Saying **run the
+worktree demo** there hands over to a project skill that drives a 2-unit batch — feat/shout and
+feat/whisper, both appending to the same file — through one batch approval, two Merge clicks and a
+merge conflict settled by the tests; the unit tabs close themselves and `deno task check` proves the
+result. Docs: `demo/GUIDE.md` (plain language) and `demo/HOW-IT-WORKS.md` (mechanics,
+troubleshooting). Tests: `demo/setup_test.ts` (`deno task demo:test`, also run by `make test`).
+
 ## 2026-09-11 — ⌘V pastes into the field you're in
 
 ### Fixed — a paste into a question's Other box landed in the nudge box
